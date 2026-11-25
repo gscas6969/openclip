@@ -6,10 +6,11 @@ import {
     createBatchJob,
     createProject,
     getDiscoverNiches,
+    getSettings,
     getTrendingVideos,
     runAiScout,
 } from "@/lib/api";
-import { AiScoutPick, DiscoverNiche, TrendingVideo } from "@/lib/types";
+import { AiScoutPick, DiscoverNiche, Settings, TrendingVideo } from "@/lib/types";
 import {
     Flame,
     Search,
@@ -24,6 +25,15 @@ import {
     Eye,
     Clock,
 } from "lucide-react";
+
+const PROVIDER_LABELS: Record<Settings["llm_provider"], string> = {
+    codex: "Codex CLI",
+    claude: "Claude CLI",
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    gemini: "Gemini",
+    ollama: "Ollama",
+};
 
 function formatViews(n: number): string {
     if (!n) return "—";
@@ -52,10 +62,11 @@ export default function DiscoverPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
-    // Codex AI Scout state
+    // AI Scout state
     const [scoutGoal, setScoutGoal] = useState("");
     const [scouting, setScouting] = useState(false);
     const [scoutPicks, setScoutPicks] = useState<Record<string, AiScoutPick>>({});
+    const [activeProvider, setActiveProvider] = useState<Settings["llm_provider"]>("codex");
     const [scoutProvider, setScoutProvider] = useState<string | null>(null);
 
     // Selection & actions
@@ -89,6 +100,11 @@ export default function DiscoverPage() {
 
     useEffect(() => {
         getDiscoverNiches().then(setNiches).catch(console.error);
+        getSettings()
+            .then((s) => {
+                if (s.llm_provider) setActiveProvider(s.llm_provider);
+            })
+            .catch(console.error);
         loadVideos("podcasts", "", 5, "score");
     }, [loadVideos]);
 
@@ -102,7 +118,7 @@ export default function DiscoverPage() {
         setScouting(true);
         setError(null);
         try {
-            const res = await runAiScout(videos, scoutGoal);
+            const res = await runAiScout(videos, scoutGoal, activeProvider);
             const map: Record<string, AiScoutPick> = {};
             for (const p of res.picks) map[p.video_id] = p;
             setScoutPicks(map);
@@ -180,7 +196,7 @@ export default function DiscoverPage() {
                         Find trending videos <span className="text-gradient">worth clipping</span>
                     </h1>
                     <p className="text-sm text-slate-400 mt-1.5 max-w-2xl">
-                        Discovers high-performing long-form YouTube videos (podcasts, interviews, breakdowns), scores them for short-form clip potential, and lets Codex scout the best viral angles.
+                        Discovers high-performing long-form YouTube videos (podcasts, interviews, breakdowns), scores them for short-form clip potential, and lets your AI scout the best viral angles.
                     </p>
                 </div>
             </div>
@@ -266,12 +282,24 @@ export default function DiscoverPage() {
                     </button>
                 </form>
 
-                {/* Codex AI Scout Bar */}
+                {/* AI Scout Bar */}
                 <div className="pt-4 border-t border-white/10 flex flex-col md:flex-row gap-3 items-stretch md:items-center">
+                    <select
+                        value={activeProvider}
+                        onChange={(e) => setActiveProvider(e.target.value as Settings["llm_provider"])}
+                        aria-label="AI Scout Provider"
+                        className="rounded-xl bg-slate-900/70 border border-indigo-500/25 px-3 py-2.5 text-xs font-bold text-indigo-200 focus:border-primary focus:outline-none flex-shrink-0"
+                    >
+                        {(["codex", "claude", "openai", "anthropic", "gemini", "ollama"] as const).map((p) => (
+                            <option key={p} value={p} className="bg-slate-900 text-white">
+                                {PROVIDER_LABELS[p]}
+                            </option>
+                        ))}
+                    </select>
                     <input
                         value={scoutGoal}
                         onChange={(e) => setScoutGoal(e.target.value)}
-                        placeholder="Optional audience/niche goal for Codex AI Scout (e.g. 'Contrarian AI & money hooks for TikTok')..."
+                        placeholder={`Optional audience/niche goal for ${PROVIDER_LABELS[activeProvider]} Scout (e.g. 'Contrarian AI & money hooks for TikTok')...`}
                         className="flex-1 rounded-xl bg-slate-950/60 border border-indigo-500/20 px-4 py-2.5 text-xs text-white placeholder-slate-500 focus:border-primary focus:outline-none"
                     />
                     <button
@@ -283,12 +311,12 @@ export default function DiscoverPage() {
                         {scouting ? (
                             <>
                                 <Loader2 className="h-4 w-4 animate-spin" />
-                                Codex Scouting Top Picks…
+                                {PROVIDER_LABELS[activeProvider]} Scouting Top Picks…
                             </>
                         ) : (
                             <>
                                 <Sparkles className="h-4 w-4" />
-                                Ask Codex AI to Scout Top 5
+                                Ask {PROVIDER_LABELS[activeProvider]} to Scout Top 5
                             </>
                         )}
                     </button>
@@ -297,7 +325,7 @@ export default function DiscoverPage() {
                 {aiPickCount > 0 && (
                     <div className="rounded-xl bg-indigo-500/10 border border-indigo-500/30 px-4 py-2.5 text-xs text-indigo-200 flex items-center justify-between">
                         <span>
-                            ✨ <strong>{scoutProvider?.toUpperCase() || "AI"}</strong> ranked the top{" "}
+                            ✨ <strong>{(scoutProvider && PROVIDER_LABELS[scoutProvider as Settings["llm_provider"]]) || scoutProvider?.toUpperCase() || "AI"}</strong> ranked the top{" "}
                             <strong>{aiPickCount}</strong> videos to the front with tailored hook angles &amp; focus prompts!
                         </span>
                     </div>

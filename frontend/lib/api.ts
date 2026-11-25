@@ -582,11 +582,12 @@ export async function getTrendingVideos(params: {
 export async function runAiScout(
     videos: TrendingVideo[],
     goal?: string,
+    provider?: Settings['llm_provider'],
 ): Promise<{ picks: AiScoutPick[]; provider: string }> {
     const res = await fetch(`${getBaseUrl()}/api/discover/ai-scout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videos, goal: goal || null }),
+        body: JSON.stringify({ videos, goal: goal || null, provider: provider || null }),
     });
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));

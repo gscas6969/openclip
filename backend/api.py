@@ -283,6 +283,7 @@ class CreateBatchRequest(BaseModel):
 class AiScoutRequest(BaseModel):
     videos: list[dict[str, Any]]
     goal: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class YouTubeClientSecretRequest(BaseModel):
@@ -1347,9 +1348,14 @@ async def discover_trending_videos(
 
 @app.post("/api/discover/ai-scout")
 async def discover_ai_scout(body: AiScoutRequest):
-    provider = await settings_mod.get_setting("llm_provider") or "codex"
+    saved_provider = await settings_mod.get_setting("llm_provider") or "codex"
+    provider = (body.provider or "").strip() or saved_provider
     api_key = await settings_mod.get_setting("llm_api_key") or ""
-    model = await settings_mod.get_setting("llm_model") or ""
+    model = (
+        await settings_mod.get_setting("llm_model") or ""
+        if provider == saved_provider
+        else settings_mod._DEFAULT_MODELS.get(provider, "")
+    )
     try:
         picks = await discover.ai_scout_videos(body.videos, body.goal, provider, api_key, model)
         return {"picks": picks, "provider": provider}
