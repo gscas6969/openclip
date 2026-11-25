@@ -43,6 +43,7 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+*.lnk
 
 # Logs
 *.log

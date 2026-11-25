@@ -1,333 +1,178 @@
-[![Watch the video](https://img.youtube.com/vi/2z7CT3J_25M/maxresdefault.jpg)](https://www.youtube.com/watch?v=2z7CT3J_25M)
+# OpenClip Studio
 
-# OpenClip by AIONIX
+> Free, open-source, local-first AI video clipping & multi-track studio engine.
+> Paste a YouTube link (including ended livestreams) or upload a local video → auto-detect highlights → smart 9:16 reframe → fine-tune in the Studio Editor → export or schedule to YouTube Shorts.
+
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Original Repo](https://img.shields.io/badge/original%20project-aionixos%2Fopenclip-blueviolet)](https://github.com/aionixos/openclip)
+
+> **Credits & Attribution:** OpenClip was originally created by **[AIONIX](https://github.com/aionixos)** in the original repository **[aionixos/openclip](https://github.com/aionixos/openclip)**. This fork builds upon AIONIX's open-source foundation (MIT License) with Studio editing, livestream highlight detection, clean sentence-aligned clip endings, and a native desktop control dashboard. If you appreciate the project, please also star the **[original OpenClip repo](https://github.com/aionixos/openclip)**!
 
 ![OpenClip Dashboard Preview](frontend/public/screenshot.png)
 
-> Open-source, local-first video clipping engine.
-> Paste a YouTube URL → download → auto-clip → export.
-
-[![GitHub Stars](https://img.shields.io/github/stars/aionixos/openclip?style=social)](https://github.com/aionixos/openclip)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Built with AI](https://img.shields.io/badge/built%20with-AI-blueviolet)](https://github.com/aionixos/openclip)
-[![Age](https://img.shields.io/badge/founder%20age-17-ff6b6b)](https://github.com/aionixos)
-
 ---
 
-## 👋 About the Creator
+## Key Features
 
-Hey — I'm **AIONIX**, a **18-year-old** builder who is obsessed with AI and machine learning.
-
-I'm on a mission to prove that powerful tools shouldn't cost money. OpenClip is my first major open-source project — built not by a team, not by a funded startup, but by a teenager with a laptop, a vision, and a lot of caffeine.
-
-> **This project is just getting started.** The roadmap is ambitious and the best features are still being built. If you believe in open-source AI tooling, now is the time to get involved — star the repo, fork it, or just stick around. 🚀
-
----
-
-## ⭐ Support the Project
-
-If OpenClip saves you time (or money on paid tools), please consider leaving a **star** on GitHub — it genuinely helps more people discover this project and motivates continued development.
-
-**[⭐ Star this repo](https://github.com/aionix/openclip)** — it takes 2 seconds and means a lot.
-
----
-
-## What is OpenClip?
-
-OpenClip is a **free, open-source, local-first** alternative to paid video clipping tools like OpusClip, Vidyo.ai, and Munch.
-
-- No subscriptions. No watermarks. No cloud uploads.
-- Everything runs **on your machine**.
-- Powered by AI for smart clip detection.
+- **100% Local-First** — No subscriptions, no watermarks, no cloud uploads. Videos, clips, and SQLite metadata stay on your machine.
+- **YouTube, Ended Livestreams & Local Uploads** — Supports standard YouTube URLs (`watch?v=`, `youtu.be/`, `/shorts/`, `/live/` VODs) as well as local `MP4`/`MOV`/`MKV`/`WEBM` uploads.
+- **Livestream & Audience Highlight Detection** — Combines YouTube **"Most Replayed" heatmaps**, **Live Chat replay spike & humor keyword detection** (`LMAO`, `HAHA`, `CLIP IT`, etc.), and **FFmpeg audio hype/laughter peaks** alongside the transcript so the AI spots genuinely funny and high-energy moments even in multi-hour VODs.
+- **Clean, Natural Clip Endings** — Pause-preserving JSON3 word timings, decimal-second LLM prompting, transcript sentence/pause boundary snapping, real-audio waveform end refinement, and subtle micro audio fade-outs prevent abrupt mid-sentence cutoffs.
+- **Multi-Provider AI** — Works with **OpenAI Codex CLI** (using your existing ChatGPT/Codex subscription), **OpenAI**, **Anthropic Claude**, **Google Gemini**, or local **Ollama**, plus custom focus prompts and one-click presets (*Funny & Chaotic*, *Stream Highlights*, *Hot Takes*, *Actionable Tips*).
+- **Smart Multi-Layout 9:16 Reframing** — Auto-detects or lets you switch between *Smart Face Track*, *Podcast Split-Screen* (with multi-camera close-up switching), *Podcast Active Speaker*, *Tutorial (Screen + Face)*, and *Original + Blur Fill*.
+- **Non-Destructive Studio Clip Editor** — Trim, cut silences/fillers, edit word-level transcripts, pick from **24 kinetic ASS caption presets** (8 animation modes), auto-inject contextual emojis, resync captions with Whisper, apply Brand Kits/logos, and export individual MP4s or a project ZIP.
+- **Creator Workflow Suite** — Batch URL Queue, Trending Video Discover + AI Scout, Local Quick Tools (trim, compress, convert, rotate/resize), YouTube Shorts OAuth auto-scheduler, Storage Cleanup manager, and a built-in **MCP server** (`backend/mcp_server.py`).
+- **Native Desktop Control Dashboard (No Electron)** — Lightweight Python `tkinter` launcher ([launcher_dash.py](launcher_dash.py) / [dashboard.ps1](dashboard.ps1)) with one-click **Start / Stop / Restart**, live status indicators, browser shortcuts, and real-time Backend + Frontend logs.
 
 ---
 
 ## Tech Stack
 
-| Layer            | Tool                           |
-|------------------|--------------------------------|
-| YouTube Download | yt-dlp (CLI)                   |
-| Video Cutting    | FFmpeg (direct CLI subprocess) |
-| Layout Detect    | Pillow / numpy                 |
-| Face Tracking    | MediaPipe (Tasks API)          |
-| Audio Tracking   | FFmpeg (astats RMS energy)     |
-| Final Rendering  | FFmpeg (filter_complex)        |
-| Backend          | Python (FastAPI)               |
-| Frontend         | Next.js (React + TypeScript)   |
-| Local Storage    | SQLite                         |
-
----
-
-## Project Structure
-
-```
-openclip/
-├── backend/
-│   ├── api.py              ← FastAPI routes + WebSocket
-│   ├── database.py         ← SQLite schema & CRUD
-│   ├── downloader.py       ← yt-dlp integration
-│   ├── clipper.py          ← FFmpeg clip generation
-│   ├── reframer.py         ← 9:16 reframing via FFmpeg
-│   ├── layout_detector.py  ← Smart screen & face layout detector
-│   ├── speaker_detector.py ← Active speaker detection (Audio + Lips)
-│   ├── transcriber.py      ← Transcript (YouTube captions → Gemini Live → Whisper)
-│   ├── gemini_transcriber.py ← Speech-to-text via Gemini Transcribe Live
-│   ├── llm.py              ← AI clip suggestions
-│   └── requirements.txt
-├── frontend/
-│   ├── app/
-│   │   ├── page.tsx                ← Dashboard
-│   │   ├── create/page.tsx         ← Create New
-│   │   └── project/[id]/page.tsx   ← View Project
-│   ├── components/
-│   │   ├── ProjectCard.tsx
-│   │   ├── ProgressBar.tsx
-│   │   ├── ClipCard.tsx
-│   │   └── VideoPlayer.tsx
-│   ├── lib/
-│   │   └── api.ts          ← Typed API client
-│   └── package.json
-├── data/
-│   └── openclip.db         ← SQLite database (auto-created)
-├── tmp/                    ← Downloaded/processed videos
-└── README.md
-```
+| Layer               | Tool                                                          |
+| ------------------- | ------------------------------------------------------------- |
+| YouTube Download    | `yt-dlp` (CLI)                                                |
+| Video & Audio       | `FFmpeg` / `ffprobe` (direct CLI subprocess + `filter_complex`) |
+| Transcripts         | YouTube JSON3 captions → Transcript API → Gemini Live → Whisper |
+| Highlight Signals   | YouTube Heatmap + Live Chat Replay + FFmpeg 4 kHz RMS peaks   |
+| Face & Lip Tracking | MediaPipe Tasks API (BlazeFace + FaceLandmarker) + OpenCV     |
+| Caption Engine      | Kinetic ASS renderer (24 presets, 8 animation modes)          |
+| Backend             | Python 3.11+ (FastAPI, Uvicorn, aiosqlite)                    |
+| Frontend            | Next.js 16 (React 19, TypeScript, Tailwind CSS)               |
+| Desktop Launcher    | Python `tkinter` (native, zero extra dependencies)            |
+| Local Storage       | SQLite (`data/openclip.db`) + Fernet-encrypted API keys       |
 
 ---
 
 ## Quick Start
 
-### One-Line Install
+### Prerequisites
 
-```bash
-git clone https://github.com/aionixos/openclip.git && cd openclip && bash setup.sh
-```
-
-Or if you've already cloned the repo:
-
-```bash
-bash setup.sh
-```
-
-Then start the app:
-
-```bash
-bash start.sh
-```
+- **Python 3.11 or 3.12** *(3.12 recommended for MediaPipe & Whisper wheel compatibility)*
+- **Node.js 18+**
+- **FFmpeg** installed and on `PATH` (or installed via `winget install Gyan.FFmpeg` on Windows)
 
 ### Windows (PowerShell)
 
-`bash` isn't available in PowerShell or cmd, so use the PowerShell scripts instead:
+1. **Clone & run setup:**
+   ```powershell
+   git clone https://github.com/gscas6969/openclip.git
+   cd openclip
+   powershell -ExecutionPolicy Bypass -File .\setup.ps1
+   ```
+2. **Start OpenClip** using either the **Desktop Control Dashboard** or the **CLI script**:
+   - **Desktop Control Dashboard (recommended, GUI with Start/Stop/Logs):**
+     ```powershell
+     powershell -ExecutionPolicy Bypass -File .\dashboard.ps1
+     ```
+     *(You can also run `launcher_dash.py` via a Windows shortcut pointing to `backend\.venv\Scripts\pythonw.exe` with `"launcher_dash.py"` as the argument.)*
+   - **Terminal launcher (`Ctrl + C` stops both servers):**
+     ```powershell
+     powershell -ExecutionPolicy Bypass -File .\start.ps1
+     ```
 
+### macOS / Linux
+
+```bash
+git clone https://github.com/gscas6969/openclip.git
+cd openclip
+bash setup.sh
+bash start.sh
+```
+
+### Local URLs
+
+- **Frontend App:** http://localhost:5000
+- **Backend API:** http://localhost:8000
+- **Interactive API Docs:** http://localhost:8000/docs
+
+---
+
+## Project Structure
+
+```text
+openclip/
+├── launcher_dash.py           ← Native tkinter Control Dashboard (Start/Stop/Logs)
+├── dashboard.ps1              ← PowerShell launcher for the Control Dashboard
+├── setup.ps1 / setup.sh       ← Dependency & environment setup scripts
+├── start.ps1 / start.sh       ← Terminal launcher for Backend + Frontend
+├── backend/
+│   ├── api.py                 ← FastAPI routes, pipeline orchestration & WebSockets
+│   ├── database.py            ← SQLite schema & async CRUD
+│   ├── downloader.py          ← yt-dlp video downloader
+│   ├── transcriber.py         ← JSON3 captions → Transcript API → Gemini Live → Whisper
+│   ├── gemini_transcriber.py  ← Speech-to-text via Gemini Transcribe Live
+│   ├── highlight_signals.py   ← Most Replayed heatmap, live chat spikes & audio hype
+│   ├── llm.py                 ← Multi-provider Map-Reduce AI clip finder
+│   ├── clip_boundaries.py     ← Sentence/pause boundary snapping & audio end refinement
+│   ├── reframer.py            ← Multi-layout 9:16 reframing & active speaker tracking
+│   ├── layout_detector.py     ← Smart screen & face layout detector
+│   ├── speaker_detector.py    ← Lip-movement & audio RMS speaker tracker
+│   ├── captioner.py           ← 24 kinetic ASS caption styles & block builder
+│   ├── editor_engine.py       ← Non-destructive render compiler, waveform & silence cut
+│   ├── batch_queue.py         ← Multi-URL sequential batch processor
+│   ├── discover.py            ← Trending video discovery & AI Scout
+│   ├── quick_tools.py         ← Local FFmpeg trim, compress, convert & transform tools
+│   ├── youtube_uploader.py    ← YouTube Shorts OAuth & native scheduling
+│   ├── storage_manager.py     ← Disk usage stats & cleanup utility
+│   ├── mcp_server.py          ← Local MCP server for AI clients
+│   └── settings.py            ← Encrypted local settings storage
+├── frontend/
+│   ├── app/
+│   │   ├── page.tsx                 ← Dashboard
+│   │   ├── create/page.tsx          ← Create project (YouTube / VOD / Upload + presets)
+│   │   ├── project/[id]/page.tsx    ← Project clips, relayout & YouTube scheduling
+│   │   ├── project/[id]/edit/[clipId]/page.tsx ← Multi-track Studio Clip Editor
+│   │   ├── batch/page.tsx           ← Batch URL queue
+│   │   ├── discover/page.tsx        ← Trending video discovery + AI Scout
+│   │   ├── tools/page.tsx           ← Local Quick Tools
+│   │   └── settings/page.tsx        ← LLM, Whisper, Brand Kits, YouTube & Storage
+│   └── components/                  ← UI & Studio Editor components
+├── data/                            ← SQLite DB + local encryption key (gitignored)
+└── tmp/                             ← Downloaded videos & rendered clips (gitignored)
+```
+
+---
+
+## Core API Endpoints
+
+| Method | Path                                   | Description                                 |
+| ------ | -------------------------------------- | ------------------------------------------- |
+| GET    | `/api/projects`                        | List all projects                           |
+| POST   | `/api/projects`                        | Create project from YouTube / livestream URL|
+| POST   | `/api/projects/upload`                 | Upload local video & start pipeline         |
+| GET    | `/api/projects/{id}`                   | Get project details & clips                 |
+| POST   | `/api/projects/{id}/retry`             | Resume project from last checkpoint         |
+| DELETE | `/api/projects/{id}`                   | Delete project & disk files                 |
+| POST   | `/api/clips/{id}/render`               | Render clip from Studio Editor `edit_state` |
+| POST   | `/api/clips/{id}/layout`               | Re-reframe clip with a different 9:16 layout|
+| POST   | `/api/clips/{id}/resync-whisper`       | Word-level Whisper resync for a clip        |
+| POST   | `/api/clips/{id}/publish/youtube`      | Upload/schedule clip to YouTube Shorts      |
+| POST   | `/api/batch`                           | Enqueue multiple YouTube URLs               |
+| WS     | `/ws/progress/{id}`                    | Real-time pipeline progress stream          |
+
+---
+
+## FAQ
+
+**Where is my data stored?**
+Everything stays locally on your machine:
+- Videos & rendered clips: `tmp/{project_id}/`
+- Database & encrypted keys: `data/openclip.db` + `data/.secret_key`
+
+Only external requests made are `yt-dlp` (to YouTube) and your chosen LLM provider API (or zero external LLM calls if using local **Ollama**).
+
+**Does it work on ended livestreams?**
+Yes — paste a `youtube.com/watch?v=...` or `youtube.com/live/...` URL from an ended stream (or upload the VOD). OpenClip automatically scans YouTube's Most Replayed heatmap, live chat reaction spikes, and audio hype/laughter peaks alongside the transcript, and you can click the **Funny & Chaotic** or **Stream Highlights** preset on the Create page.
+
+**How do I run tests?**
 ```powershell
-git clone https://github.com/aionixos/openclip.git; cd openclip
-powershell -ExecutionPolicy Bypass -File .\setup.ps1
-powershell -ExecutionPolicy Bypass -File .\start.ps1
-```
-
-This will start:
-- **Frontend:** http://localhost:3000
-- **Backend:** http://localhost:8000
-- **API Docs:** http://localhost:8000/docs
-
-### Prerequisites
-
-- **Python 3.11+**
-- **Node.js 18+**
-- **FFmpeg** installed and on PATH
-
-> The setup script will check all dependencies and install yt-dlp automatically if needed.
-
----
-
-## API Endpoints
-
-| Method | Path                            | Description                     |
-|--------|---------------------------------|---------------------------------|
-| GET    | `/api/projects`                 | List all projects               |
-| POST   | `/api/projects`                 | Create new project + auto-start |
-| GET    | `/api/projects/{id}`            | Get project details & clips     |
-| DELETE | `/api/projects/{id}`            | Delete project & files          |
-| POST   | `/api/clips/{id}/layout`        | Reprocess a clip's layout       |
-| WS     | `/ws/progress/{id}`             | Real-time progress updates      |
-
----
-
-## MVP Scope
-
-✅ Paste YouTube URL → download via yt-dlp
-✅ Extract captions (Manual → Auto → Gemini Transcribe Live → Whisper)
-✅ AI-driven viral hook detection (LLM)
-✅ Smart layout detection (Tutorial, Podcast, Panel, Single, None)
-✅ Active speaker tracking via FFmpeg audio RMS
-✅ Auto-cut and face-track into 9:16 clips (FFmpeg filter_complex + MediaPipe)
-✅ Save project + rich clip metadata to SQLite
-✅ Display clips in View Project screen
-✅ Show history on Dashboard
-✅ Real-time progress via WebSocket
-
----
-
-## Roadmap
-
-> OpenClip is actively being built. Here's what's coming next:
-
-- [ ] Phase 3: Scene & silence-based auto clip detection
-- [ ] Batch processing for multiple URLs
-- [ ] Export presets (TikTok, Reels, Shorts)
-- [ ] Custom branding / watermark overlay
-- [ ] GUI installer for non-technical users
-
----
-
-## Contributing
-
-OpenClip is open to contributors of all levels. If you find a bug, have a feature idea, or want to help build the roadmap — open an issue or a PR. All contributions are welcome.
-
-See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, coding guidelines and the PR process.
-
----
-
-## Frequently Asked Questions
-
-**Q1. Do I need to pay for anything?**
-```
-No. OpenClip is 100% free and local.
-You only need an API key from your chosen LLM provider.
-All providers have free tiers:
-  Gemini 1.5 Flash → 1,500 requests/day free
-  Ollama           → completely free, runs locally
-  OpenAI/Anthropic → paid but cheap (~$0.01 per video)
-FFmpeg, yt-dlp, Python, Node — all free.
+cd backend
+.\.venv\Scripts\python.exe -m unittest -v test_clip_boundaries.py test_highlight_signals.py
 ```
 
 ---
 
-**Q2. Where is my data stored?**
-```
-Everything stays on your computer. Nothing goes to any cloud.
-  Videos    → /tmp folder on your machine
-  Database  → /data/openclip.db (SQLite file)
-  Settings  → same SQLite file, API keys encrypted
-  Clips     → /tmp/{project_id}/clips/
+## Credits & License
 
-The only external calls are:
-  yt-dlp   → YouTube (to download)
-  LLM API  → your chosen provider (transcript only)
-  Gemini   → the audio track, only for videos without YouTube captions
-             and only when a Gemini key is set (Gemini Transcribe Live)
-```
-
----
-
-**Q3. How do I add my API key?**
-```
-1. Open OpenClip in browser (http://localhost:3000)
-2. Click Settings (gear icon, top right)
-3. Choose your LLM provider from dropdown
-4. Paste your API key
-5. Click Save
-
-Your key is encrypted and stored locally.
-It never leaves your machine except to call the LLM API.
-```
-
----
-
-**Q4. FFmpeg is not working / not found**
-```
-FFmpeg must be installed separately. Steps:
-
-Windows:
-  1. Download from https://ffmpeg.org/download.html
-  2. Extract zip
-  3. Add bin/ folder to System PATH
-  4. Restart terminal
-  5. Test: ffmpeg -version
-
-Mac:
-  brew install ffmpeg
-
-Linux:
-  sudo apt install ffmpeg
-
-Then restart OpenClip backend.
-```
-
----
-
-**Q5. Can I contribute if I only know frontend / only know Python?**
-```
-Yes. The project is split cleanly:
-
-Frontend only (Next.js/TypeScript):
-  Look for issues labeled "frontend"
-  You never need to touch Python
-
-Backend only (Python/FastAPI):
-  Look for issues labeled "backend"
-  You never need to touch React
-
-Docs only:
-  Look for issues labeled "documentation"
-  Just markdown, no code needed
-
-Design only:
-  Look for issues labeled "design"
-  Figma or CSS improvements welcome
-```
-
----
-
-**Q6. My video failed to process, what do I do?**
-```
-Check in this order:
-
-1. Is FFmpeg installed?
-   Run: ffmpeg -version
-
-2. Is the video public?
-   Private/age-restricted videos cannot be downloaded.
-
-3. Did the LLM fail?
-   Check your API key in Settings.
-   Check your provider's quota/limits.
-
-4. Check terminal logs:
-   Backend terminal shows exact error.
-   Copy the error and open a GitHub Issue.
-
-5. Try a shorter video first (under 10 minutes)
-   to verify your setup works.
-```
----
-
-**Q7. How do I suggest a feature or report a bug?**
-```
-Feature idea:
-  Go to GitHub → Discussions → Ideas
-  Describe what you want and why.
-  Upvote existing ideas you agree with.
-
-Bug report:
-  Go to GitHub → Issues → New Issue
-  Choose "Bug Report" template
-  Fill in all fields including your terminal error.
-
-Want to build something yourself:
-  Comment on the issue "I'll work on this"
-  Fork the repo, build it, open a Pull Request.
-  We review and merge if it's good.
-```
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-<p align="center">
-  Built with 🤖 by <strong>AIONIX</strong> — age 18, just getting started.
-</p>
+- **Original Creator:** **[AIONIX](https://github.com/aionixos)** — original repository at **[github.com/aionixos/openclip](https://github.com/aionixos/openclip)**
+- **License:** MIT License — see [LICENSE](LICENSE) for full terms.
