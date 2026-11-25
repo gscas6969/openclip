@@ -27,6 +27,7 @@ import database # type: ignore
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODELS = {
+    "codex": "",
     "openai": "gpt-4o",
     "anthropic": "claude-sonnet-5-5",
     "gemini": "gemini-3.5-flash",
@@ -98,7 +99,7 @@ def _decrypt(token: str) -> str:
 
 
 # Keys whose values should be encrypted at rest
-_ENCRYPTED_KEYS = {"llm_api_key"}
+_ENCRYPTED_KEYS = {"llm_api_key", "youtube_client_secret", "youtube_token"}
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +126,9 @@ async def get_setting(key: str) -> Optional[str]:
         row = await cursor.fetchone()
         if not row:
             if key == "caption_style":
-                return "viral_word"
+                return "mozi_pop"
+            if key == "llm_provider":
+                return "codex"
             return None
         value = row[0] # type: ignore
         if key in _ENCRYPTED_KEYS and value:
@@ -188,10 +191,10 @@ async def get_all_settings() -> Dict[str, Any]:
         # Fill in defaults for anything never saved, so the UI always gets
         # every field (a missing llm_model made the Settings input flip from
         # uncontrolled to controlled).
-        result.setdefault("llm_provider", "openai")
+        result.setdefault("llm_provider", "codex")
         result.setdefault("llm_model", _DEFAULT_MODELS.get(result["llm_provider"], ""))
         result.setdefault("whisper_model", "base")
-        result.setdefault("caption_style", "viral_word")
+        result.setdefault("caption_style", "mozi_pop")
         result.setdefault("has_api_key", False)
 
     except Exception as exc:

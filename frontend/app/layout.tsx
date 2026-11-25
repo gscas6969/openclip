@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import "./globals.css";
 import { Navbar } from "@/components/layout/Navbar";
 
 export const metadata: Metadata = {
-  title: "OpenClip — Turn YouTube videos into viral clips",
-  description: "AI-powered local-first video clipping. Extract highlights, add captions, and resize for TikTok, Reels, and Shorts.",
+  title: "OpenClip Studio — Turn videos into viral clips",
+  description: "AI-powered local-first video clipping and multi-track caption editor for TikTok, Reels, and Shorts.",
 };
 
 export default function RootLayout({
@@ -16,7 +17,9 @@ export default function RootLayout({
     <html lang="en" className="dark" suppressHydrationWarning>
       <body>
         <div className="relative flex min-h-screen flex-col bg-black">
-          <Navbar />
+          <Suspense fallback={<div className="h-[73px] border-b border-white/5 bg-black" />}>
+            <Navbar />
+          </Suspense>
           <main className="flex-1">
             {children}
           </main>

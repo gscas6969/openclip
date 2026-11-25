@@ -68,3 +68,12 @@ frontend/*-errors.txt
 
 # Private dev notes
 Devlog.md
+
+# Local OAuth secrets, models, and media artifacts
+client_secret*.json
+*.task
+*.tflite
+*.mp4
+*.mkv
+*.mov
+*.webm

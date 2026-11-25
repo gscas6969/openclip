@@ -74,6 +74,14 @@ def _normalize_transcript_items(items: list[object]) -> list[dict]:
         end = max(start + duration, start + 0.2)
         segments.append({"start": start, "end": end, "text": text})
 
+    # De-overlap rolling YouTube 2-line caption display durations so segment[i]
+    # ends when segment[i+1] begins instead of staying onscreen on top of it.
+    segments.sort(key=lambda s: (s["start"], s["end"]))
+    for i in range(len(segments) - 1):
+        next_start = segments[i + 1]["start"]
+        if next_start > segments[i]["start"] + 0.05 and segments[i]["end"] > next_start:
+            segments[i]["end"] = next_start
+
     return segments
 
 
@@ -103,37 +111,38 @@ async def extract_captions(
 
             [{"start": 0.0, "end": 5.2, "text": "Hey welcome back..."}, ...]
     """
-    _notify(progress_callback, 5, "Checking user-provided captions...")
-    logger.info("Trying transcript API manual captions...")
-    result = await _get_transcript_api_captions(youtube_url, generated=False)
-    if result:
-        logger.info("Found transcript API manual captions (%d segments)", len(result))
-        _notify(progress_callback, 25, "Using user-provided captions")
-        return result
-    logger.info("No transcript API manual captions found")
+    if youtube_url and not youtube_url.startswith("upload://"):
+        # Prefer yt-dlp JSON3 subtitles first because they include exact
+        # word-level tOffsetMs timings (tighter karaoke/highlight sync!).
+        _notify(progress_callback, 10, "Checking word-level YouTube captions...")
+        result = await _get_manual_captions(youtube_url)
+        if result:
+            _notify(progress_callback, 40, "Using word-level manual YouTube captions")
+            return result
 
-    _notify(progress_callback, 30, "Checking auto-generated captions...")
-    logger.info("Trying transcript API auto captions...")
-    result = await _get_transcript_api_captions(youtube_url, generated=True)
-    if result:
-        logger.info("Found transcript API auto captions (%d segments)", len(result))
-        _notify(progress_callback, 55, "Using auto-generated captions")
-        return result
-    logger.info("No transcript API auto captions found")
+        _notify(progress_callback, 35, "Checking word-level auto captions...")
+        result = await _get_auto_captions(youtube_url)
+        if result:
+            _notify(progress_callback, 65, "Using word-level auto YouTube captions")
+            return result
 
-    _notify(progress_callback, 60, "Fallback: yt-dlp manual captions...")
-    result = await _get_manual_captions(youtube_url)
-    if result:
-        _notify(progress_callback, 75, "Using yt-dlp manual captions")
-        return result
+        _notify(progress_callback, 70, "Fallback: Transcript API manual captions...")
+        logger.info("Trying transcript API manual captions...")
+        result = await _get_transcript_api_captions(youtube_url, generated=False)
+        if result:
+            logger.info("Found transcript API manual captions (%d segments)", len(result))
+            _notify(progress_callback, 82, "Using user-provided captions")
+            return result
 
-    _notify(progress_callback, 80, "Fallback: yt-dlp auto captions...")
-    result = await _get_auto_captions(youtube_url)
-    if result:
-        _notify(progress_callback, 90, "Using yt-dlp auto captions")
-        return result
+        _notify(progress_callback, 85, "Fallback: Transcript API auto captions...")
+        logger.info("Trying transcript API auto captions...")
+        result = await _get_transcript_api_captions(youtube_url, generated=True)
+        if result:
+            logger.info("Found transcript API auto captions (%d segments)", len(result))
+            _notify(progress_callback, 90, "Using auto-generated captions")
+            return result
 
-    # No captions on YouTube: transcribe the audio ourselves. Gemini
+    # Local upload or no YouTube captions: transcribe audio directly.
     # Transcribe Live runs in the cloud (fast, nothing heavy to install);
     # local Whisper is the fallback when there's no Gemini key or it fails.
     gemini_api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
@@ -414,15 +423,33 @@ async def _get_whisper_transcript(
             return []
             
         model = whisper.load_model(whisper_model or "base")
-        result = model.transcribe(video_path)
+        try:
+            result = model.transcribe(video_path, word_timestamps=True)
+        except Exception:
+            result = model.transcribe(video_path)
 
         segments: list[dict] = []
         for seg in result.get("segments", []):
-            segments.append({
+            entry: dict = {
                 "start": float(seg["start"]),
                 "end": float(seg["end"]),
                 "text": seg["text"].strip(),
-            })
+            }
+            raw_words = seg.get("words") or []
+            if raw_words:
+                words = []
+                for w in raw_words:
+                    w_text = str(w.get("word", "")).strip()
+                    if not w_text:
+                        continue
+                    words.append({
+                        "word": w_text,
+                        "start": float(w.get("start", entry["start"])),
+                        "end": float(w.get("end", entry["end"])),
+                    })
+                if words:
+                    entry["words"] = words
+            segments.append(entry)
 
         return segments
 

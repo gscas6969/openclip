@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getProjects, deleteProject, createProject, getApiBaseUrl } from "@/lib/api";
@@ -45,7 +45,7 @@ function StatusBadge({ status }: { status: Project["status"] }) {
     );
 }
 
-export default function Dashboard() {
+function DashboardContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const searchQuery = searchParams.get("q") || "";
@@ -299,5 +299,13 @@ export default function Dashboard() {
             )}
 
         </div>
+    );
+}
+
+export default function Dashboard() {
+    return (
+        <Suspense fallback={<div className="p-12 text-center text-slate-400">Loading projects…</div>}>
+            <DashboardContent />
+        </Suspense>
     );
 }

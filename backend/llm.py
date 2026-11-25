@@ -5,6 +5,9 @@ llm.py — Multi-provider LLM integration for clip suggestion (v4.0 Map-Reduce).
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import logging
 import asyncio
 import random
@@ -28,7 +31,10 @@ async def get_clip_suggestions(
     api_key: str,
     model: str,
     video_duration: float,
-    progress_callback: Optional[Callable[[str, float, str], None]] = None
+    progress_callback: Optional[Callable[[str, float, str], None]] = None,
+    min_duration: int = 30,
+    max_duration: int = 60,
+    custom_prompt: Optional[str] = None,
 ) -> list[dict]:
     """
     Map-Reduce approach to stay under TPM limits.
@@ -41,6 +47,9 @@ async def get_clip_suggestions(
     if not transcript:
         logger.warning("Empty transcript — skipping LLM call")
         return []
+
+    min_duration = max(10, int(min_duration or 30))
+    max_duration = max(min_duration + 10, int(max_duration or 60))
 
     def progress(stage: str, pct: float, msg: str):
         if progress_callback:
@@ -67,7 +76,12 @@ async def get_clip_suggestions(
             f"Analyzing part {i+1} of {len(chunks)}..."
         )
         try:
-            candidates = await _analyze_chunk(chunk, i, len(chunks), caller)
+            candidates = await _analyze_chunk(
+                chunk, i, len(chunks), caller,
+                min_duration=min_duration,
+                max_duration=max_duration,
+                custom_prompt=custom_prompt,
+            )
             all_candidates.extend(candidates)
         except Exception as exc:
             if not is_retryable(exc):
@@ -88,7 +102,7 @@ async def get_clip_suggestions(
 
     # Step 3 — If only 1 chunk, candidates are already final
     if len(chunks) == 1 or not all_candidates:
-        return _validate_suggestions(all_candidates, video_duration)
+        return _validate_suggestions(all_candidates, video_duration, min_duration, max_duration)
 
     # Step 4 — Rank all candidates (REDUCE). If ranking fails or returns
     # nothing usable, rank locally by viral score instead of failing.
@@ -98,15 +112,22 @@ async def get_clip_suggestions(
     final_clips: list[dict] = []
     try:
         final_clips = _validate_suggestions(
-            await _rank_candidates(all_candidates, caller),
+            await _rank_candidates(
+                all_candidates, caller,
+                min_duration=min_duration,
+                max_duration=max_duration,
+                custom_prompt=custom_prompt,
+            ),
             video_duration,
+            min_duration,
+            max_duration,
         )
     except Exception as exc:
         logger.warning(f"Ranking step failed, ranking locally instead: {exc}")
         progress("analyzing", 73, f"Warning: AI ranking failed ({friendly_error(exc)}), picking the top-scored moments instead")
 
     if not final_clips:
-        final_clips = _validate_suggestions(_rank_locally(all_candidates), video_duration)
+        final_clips = _validate_suggestions(_rank_locally(all_candidates), video_duration, min_duration, max_duration)
 
     progress("analyzing", 75, f"Found {len(final_clips)} clips")
     return final_clips
@@ -153,11 +174,14 @@ async def _analyze_chunk(
     chunk_index: int,
     total_chunks: int,
     caller: "_ModelCaller",
+    min_duration: int = 30,
+    max_duration: int = 60,
+    custom_prompt: Optional[str] = None,
 ) -> list[dict]:
     """
     Send ONE chunk to LLM. Stay under 1500 tokens.
     """
-    prompt = _build_chunk_prompt(chunk, chunk_index, total_chunks)
+    prompt = _build_chunk_prompt(chunk, chunk_index, total_chunks, min_duration, max_duration, custom_prompt)
     raw = await caller.call(prompt)
     logger.info(f"LLM raw response for chunk {chunk_index+1}: {raw[:500]}")
     parsed = _parse_llm_json(raw)
@@ -168,12 +192,15 @@ async def _analyze_chunk(
 async def _rank_candidates(
     candidates: list[dict],
     caller: "_ModelCaller",
+    min_duration: int = 30,
+    max_duration: int = 60,
+    custom_prompt: Optional[str] = None,
 ) -> list[dict]:
     """
     Final reduce step. Send ALL candidates to LLM
     and ask it to pick the best 5-10.
     """
-    prompt = _build_reduce_prompt(candidates)
+    prompt = _build_reduce_prompt(candidates, min_duration, max_duration, custom_prompt)
     raw = await caller.call(prompt)
     return _parse_llm_json(raw)
 
@@ -211,11 +238,12 @@ def _format_candidates(candidates: list[dict]) -> str:
 
 def _validate_suggestions(
     suggestions: list[dict],
-    video_duration: float
+    video_duration: float,
+    min_duration: int = 30,
+    max_duration: int = 60,
 ) -> list[dict]:
     """
-    Final validation pass on all suggestions.
-    Tries strict 60-80s first; if nothing survives, falls back to lenient (15s+).
+    Final validation pass on all suggestions using configured duration bounds.
     """
     logger.info(f"RAW LLM SUGGESTIONS RECEIVED FOR VALIDATION ({len(suggestions)} clips): {suggestions}")
 
@@ -223,16 +251,21 @@ def _validate_suggestions(
         logger.warning("No suggestions received from LLM at all")
         return []
 
-    # --- First pass: strict 60-80s ---
-    strict = _filter_suggestions(suggestions, video_duration, min_dur=45, target_min=60, target_max=80)
+    strict_min = max(10, int(min_duration * 0.75))
+    strict = _filter_suggestions(
+        suggestions, video_duration,
+        min_dur=strict_min, target_min=min_duration, target_max=max_duration,
+    )
 
     if strict:
         logger.info(f"Strict validation kept {len(strict)} clips")
         return strict
 
-    # --- Fallback: lenient, accept anything 15s+ and extend short ones to 60s ---
-    logger.warning("Strict 60-80s validation returned 0 clips — falling back to lenient mode")
-    lenient = _filter_suggestions(suggestions, video_duration, min_dur=15, target_min=60, target_max=90)
+    logger.warning("Strict validation returned 0 clips — falling back to lenient mode")
+    lenient = _filter_suggestions(
+        suggestions, video_duration,
+        min_dur=10, target_min=min_duration, target_max=max(max_duration + 15, 90),
+    )
 
     if lenient:
         logger.info(f"Lenient validation kept {len(lenient)} clips")
@@ -299,21 +332,28 @@ def _filter_suggestions(
     return non_overlapping
 
 
-def _build_chunk_prompt(chunk: list[dict], chunk_index: int, total_chunks: int) -> str:
-    # Get the time bounds of this chunk
+def _build_chunk_prompt(
+    chunk: list[dict],
+    chunk_index: int,
+    total_chunks: int,
+    min_duration: int = 30,
+    max_duration: int = 60,
+    custom_prompt: Optional[str] = None,
+) -> str:
     chunk_start = chunk[0]["start"] if chunk else 0
     chunk_end = chunk[-1]["end"] if chunk else 0
+    focus_note = f"\n- Creator Focus Instruction: {custom_prompt.strip()}" if custom_prompt and custom_prompt.strip() else ""
 
     return f"""You are a viral video editor.
-This is part {chunk_index+1} of {total_chunks} of a YouTube video transcript.
+This is part {chunk_index+1} of {total_chunks} of a video transcript.
 This section covers timestamps from {chunk_start:.0f}s to {chunk_end:.0f}s.
 
 Find the 3-5 BEST moments in this section suitable for viral short clips.
 
 Rules:
-- Each clip MUST be between 60 and 80 seconds long. This is STRICT — no shorter, no longer.
+- Each clip MUST be between {min_duration} and {max_duration} seconds long. This is STRICT — no shorter, no longer.
 - Clips MUST stay within this section's bounds: {chunk_start:.0f}s to {chunk_end:.0f}s
-- Must start and end at natural speech boundaries
+- Must start and end at natural speech boundaries with a strong opening hook{focus_note}
 - Only pick genuinely strong moments
 - You MUST return at least 2-3 clips for this section so we have enough options
 - Make sure "start" and "end" are float numbers of seconds
@@ -339,21 +379,27 @@ Return ONLY JSON array:
 If no strong moments found return: []"""
 
 
-def _build_reduce_prompt(candidates: list[dict]) -> str:
+def _build_reduce_prompt(
+    candidates: list[dict],
+    min_duration: int = 30,
+    max_duration: int = 60,
+    custom_prompt: Optional[str] = None,
+) -> str:
+    focus_note = f"\n- Prioritize clips matching this creator focus: {custom_prompt.strip()}" if custom_prompt and custom_prompt.strip() else ""
     return f"""You are a viral video editor.
-Below are candidate clip moments found across a YouTube video.
+Below are candidate clip moments found across a video.
 Select the best clips for maximum viral potential.
 
 CANDIDATES:
 {_format_candidates(candidates)}
 
 Rules:
-- Return between 5 and 10 clips (each STRICTLY between 60 and 80 seconds long)
-- You MUST return AT LEAST 5 clips. This is a strict requirement!
+- Return between 5 and 10 clips (each STRICTLY between {min_duration} and {max_duration} seconds long)
+- You MUST return AT LEAST 5 clips when enough candidates exist.{focus_note}
 - No overlapping timestamps
 - Sort by start time ascending
 - "start" and "end" must be float numbers of seconds
-- Adjust start/end timestamps if needed to ensure each clip is 60-80 seconds
+- Adjust start/end timestamps if needed to ensure each clip is {min_duration}-{max_duration} seconds
 - Keep the existing title, reason, viral_score, hashtags, and tags from candidates
 
 Return ONLY the selected candidates as JSON array in the exact same format. Do not remove any fields.
@@ -492,6 +538,7 @@ def _retry_after_header(resp: httpx.Response) -> float:
 )
 async def _call_provider_with_retry(provider: str, api_key: str, model: str, prompt: str) -> str:
     dispatch = {
+        "codex": _call_codex,
         "openai": _call_openai,
         "anthropic": _call_anthropic,
         "gemini": _call_gemini,
@@ -513,12 +560,14 @@ async def _call_provider_with_retry(provider: str, api_key: str, model: str, pro
 
 
 async def _call_openai(prompt: str, api_key: str, model: str) -> str:
+    if not (api_key or "").strip():
+        raise ProviderError("OpenAI API key missing. Set it in Settings or switch provider to Codex.", status=401)
     model = model or "gpt-4o"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
             "https://api.openai.com/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {api_key.strip()}",
                 "Content-Type": "application/json",
             },
             json={
@@ -533,12 +582,14 @@ async def _call_openai(prompt: str, api_key: str, model: str) -> str:
 
 
 async def _call_anthropic(prompt: str, api_key: str, model: str) -> str:
+    if not (api_key or "").strip():
+        raise ProviderError("Anthropic API key missing. Set it in Settings or switch provider to Codex.", status=401)
     model = model or "claude-sonnet-5-5"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={
-                "x-api-key": api_key,
+                "x-api-key": api_key.strip(),
                 "anthropic-version": "2023-06-01",
                 "Content-Type": "application/json",
             },
@@ -622,6 +673,121 @@ async def _call_ollama(prompt: str, api_key: str, model: str) -> str:
         resp.raise_for_status()
         data = resp.json()
         return data.get("response", "[]")
+
+
+def _find_codex_exe() -> Optional[str]:
+    """Locate the official OpenAI Codex CLI binary on PATH."""
+    for name in ("codex.cmd", "codex.exe", "codex"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def check_codex_status() -> dict:
+    """Inspect whether the official Codex CLI is installed and logged in."""
+    exe = _find_codex_exe()
+    if not exe:
+        return {
+            "installed": False,
+            "version": None,
+            "logged_in": False,
+            "status_text": "Codex CLI not installed (run: npm install -g @openai/codex)",
+        }
+
+    version = None
+    try:
+        v_res = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
+        if v_res.returncode == 0:
+            version = v_res.stdout.strip()
+    except Exception:
+        pass
+
+    logged_in = False
+    status_text = "Not logged in (run: codex login)"
+    try:
+        l_res = subprocess.run([exe, "login", "status"], capture_output=True, text=True, timeout=10)
+        combined = (l_res.stdout or l_res.stderr or "").strip()
+        if l_res.returncode == 0 and "logged in" in combined.lower():
+            logged_in = True
+            status_text = combined
+        elif combined:
+            status_text = combined
+    except Exception as exc:
+        status_text = str(exc)
+
+    return {
+        "installed": True,
+        "version": version,
+        "logged_in": logged_in,
+        "status_text": status_text,
+    }
+
+
+async def _call_codex(prompt: str, api_key: str, model: str) -> str:
+    """
+    Invoke the official OpenAI Codex CLI (`codex exec`) non-interactively using
+    the user's existing ChatGPT/Codex subscription (no OpenAI API key needed).
+    """
+    exe = _find_codex_exe()
+    if not exe:
+        raise ProviderError(
+            "Codex CLI not found. Install it with: npm install -g @openai/codex",
+            status=400,
+        )
+
+    def _run_codex() -> str:
+        fd, out_path = tempfile.mkstemp(prefix="openclip_codex_", suffix=".txt")
+        os.close(fd)
+        try:
+            cmd = [
+                exe,
+                "exec",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "-s", "read-only",
+                "--color", "never",
+                "-o", out_path,
+            ]
+            clean_model = (model or "").strip()
+            if clean_model and clean_model.lower() not in ("auto", "default"):
+                cmd.extend(["-m", clean_model])
+            # "-" reads prompt from stdin so long transcripts never exceed Windows CLI limits
+            cmd.append("-")
+
+            logger.info("Calling Codex CLI (%s, model=%s, %d chars)", exe, clean_model or "default", len(prompt))
+            res = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+            )
+
+            output_text = ""
+            if os.path.isfile(out_path):
+                with open(out_path, "r", encoding="utf-8", errors="replace") as f:
+                    output_text = f.read().strip()
+
+            if res.returncode != 0 and not output_text:
+                err_msg = (res.stderr or res.stdout or "").strip()[-400:]
+                if "login" in err_msg.lower() or "auth" in err_msg.lower() or "401" in err_msg:
+                    raise ProviderError(f"Codex CLI authentication error: {err_msg}", status=401)
+                raise ProviderError(f"Codex CLI failed (exit {res.returncode}): {err_msg}", status=500)
+
+            return output_text or (res.stdout or "").strip() or "[]"
+        except subprocess.TimeoutExpired as exc:
+            raise ProviderError("Codex CLI timed out after 180s", status=504) from exc
+        finally:
+            if os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                except OSError:
+                    pass
+
+    return await asyncio.to_thread(_run_codex)
 
 
 # ---------------------------------------------------------------------------

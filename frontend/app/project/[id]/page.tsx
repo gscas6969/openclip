@@ -3,8 +3,16 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { getProject, getApiBaseUrl, retryProject } from "@/lib/api";
+import {
+    getProject,
+    getApiBaseUrl,
+    getExportAllUrl,
+    retryProject,
+    relayoutProject,
+} from "@/lib/api";
 import { Project, Clip } from "@/lib/types";
+import { YouTubePublishModal } from "@/components/project/YouTubePublishModal";
+import { Sliders, Download, Archive, Play, Youtube, Calendar, CheckCircle2, LayoutTemplate, Loader2 } from "lucide-react";
 
 function formatDuration(s: number) {
     const m = Math.floor(s / 60);
@@ -18,10 +26,10 @@ function getYouTubeId(url: string) {
 }
 
 const STAGE_LABEL: Record<string, string> = {
-    downloading: "Downloading video…",
+    downloading: "Preparing video…",
     transcribing: "Extracting captions…",
     analyzing: "AI analyzing…",
-    processing: "Cutting clips…",
+    processing: "Reframing & rendering clips…",
     done: "Complete",
     error: "Failed",
 };
@@ -37,14 +45,54 @@ export default function ProjectPage() {
     const [wsProgress, setWsProgress] = useState<{ stage: string; percent: number; message: string } | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const [retrying, setRetrying] = useState(false);
+    const [ytPublishClip, setYtPublishClip] = useState<Clip | null>(null);
+    const [showBatchYt, setShowBatchYt] = useState(false);
+    const [relayoutMode, setRelayoutMode] = useState("podcast_split");
+    const [relayoutingAll, setRelayoutingAll] = useState(false);
+    const [relayoutMsg, setRelayoutMsg] = useState<string | null>(null);
+
+    const handleRelayoutAll = async () => {
+        if (!project || relayoutingAll) return;
+        setRelayoutingAll(true);
+        setRelayoutMsg(null);
+        try {
+            const updated = await relayoutProject(id, relayoutMode);
+            setProject(updated);
+            if (selectedClip) {
+                const match = updated.clips?.find((c) => c.id === selectedClip.id);
+                if (match) setSelectedClip(match);
+            } else if (updated.clips?.length > 0) {
+                setSelectedClip(updated.clips[0]);
+            }
+            setRelayoutMsg(`✓ Re-reframed all ${updated.clips?.length || 0} clips with "${relayoutMode}".`);
+        } catch (err) {
+            setRelayoutMsg(err instanceof Error ? err.message : "Re-layout failed");
+        } finally {
+            setRelayoutingAll(false);
+        }
+    };
+
+    const refreshProject = () => {
+        getProject(id)
+            .then((data) => {
+                setProject(data);
+                if (selectedClip) {
+                    const updated = data.clips?.find((c) => c.id === selectedClip.id);
+                    if (updated) setSelectedClip(updated);
+                } else if (data.clips?.length > 0) {
+                    setSelectedClip(data.clips[0]);
+                }
+            })
+            .catch(console.error);
+    };
 
     useEffect(() => {
         getProject(id)
-            .then(data => {
+            .then((data) => {
                 setProject(data);
                 if (data.clips?.length > 0) setSelectedClip(data.clips[0]);
             })
-            .catch(err => setError(err instanceof Error ? err.message : "Not found"))
+            .catch((err) => setError(err instanceof Error ? err.message : "Not found"))
             .finally(() => setLoading(false));
     }, [id]);
 
@@ -68,17 +116,22 @@ export default function ProjectPage() {
         const baseUrl = getApiBaseUrl();
         const wsBase = baseUrl.replace(/^https/, "wss").replace(/^http/, "ws");
         const ws = new WebSocket(`${wsBase}/ws/progress/${id}`);
-        ws.onmessage = e => {
+        ws.onmessage = (e) => {
             try {
                 const d = JSON.parse(e.data);
                 setWsProgress({ stage: d.stage, percent: d.percent, message: d.message });
-                setLogs(prev => [...prev.slice(-49), `[${new Date().toLocaleTimeString()}] ${d.message}`]);
-                if (d.stage === "done") { ws.close(); window.location.reload(); }
+                setLogs((prev) => [...prev.slice(-49), `[${new Date().toLocaleTimeString()}] ${d.message}`]);
+                if (d.stage === "done") {
+                    ws.close();
+                    window.location.reload();
+                }
                 if (d.stage === "error") {
                     ws.close();
-                    setProject(p => p && { ...p, status: "error", error_message: d.message });
+                    setProject((p) => p && { ...p, status: "error", error_message: d.message });
                 }
-            } catch { /* ignore */ }
+            } catch {
+                /* ignore */
+            }
         };
         return () => ws.close();
     }, [project, id]);
@@ -90,7 +143,7 @@ export default function ProjectPage() {
 
     if (loading) {
         return (
-            <div className="flex h-[calc(100vh-65px)] items-center justify-center">
+            <div className="flex h-[calc(100vh-73px)] items-center justify-center">
                 <div className="flex flex-col items-center gap-3">
                     <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
                     <p className="text-slate-400 text-sm">Loading project…</p>
@@ -101,41 +154,113 @@ export default function ProjectPage() {
 
     if (error || !project) {
         return (
-            <div className="flex h-[calc(100vh-65px)] items-center justify-center flex-col gap-4">
+            <div className="flex h-[calc(100vh-73px)] items-center justify-center flex-col gap-4">
                 <p className="text-red-400 font-semibold">{error || "Project not found"}</p>
-                <Link href="/" className="text-sm text-primary hover:underline">← Back to Dashboard</Link>
+                <Link href="/" className="text-sm text-primary hover:underline">
+                    ← Back to Dashboard
+                </Link>
             </div>
         );
     }
 
     return (
-        <div className="flex h-[calc(100vh-65px)] overflow-hidden">
+        <div className="flex h-[calc(100vh-73px)] overflow-hidden">
             {/* Left: Video + Meta */}
             <section className="flex-[2] flex flex-col gap-6 overflow-y-auto custom-scrollbar p-8">
                 {/* Header */}
-                <div className="flex items-start justify-between gap-4">
-                    <div>
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                    <div className="min-w-0">
                         <div className="flex items-center gap-2 mb-1.5">
-                            <svg className="h-4 w-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
                             <span className="text-xs font-medium text-slate-500 uppercase tracking-widest">
                                 Project / {id.slice(0, 8).toUpperCase()}
                             </span>
+                            {project.source_type === "upload" && (
+                                <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                                    Local Upload
+                                </span>
+                            )}
                         </div>
-                        <h1 className="text-2xl font-bold text-white">{project.title || "Untitled Project"}</h1>
+                        <h1 className="text-2xl font-bold text-white truncate">
+                            {project.title || "Untitled Project"}
+                        </h1>
                     </div>
-                    <div className="flex gap-3 flex-shrink-0">
-                        <Link href="/" className="px-4 py-2 rounded-xl glass glass-hover text-sm font-semibold flex items-center gap-2 text-slate-300">
-                            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
-                            Dashboard
+                    <div className="flex gap-2.5 flex-shrink-0">
+                        <Link
+                            href="/"
+                            className="px-4 py-2 rounded-xl glass glass-hover text-sm font-semibold flex items-center gap-2 text-slate-300"
+                        >
+                            ← Dashboard
                         </Link>
+                        {selectedClip && (
+                            <Link
+                                href={`/project/${id}/edit/${selectedClip.id}`}
+                                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold flex items-center gap-2 transition-all"
+                            >
+                                <Sliders className="h-4 w-4" />
+                                Edit Clip in Studio
+                            </Link>
+                        )}
                         {project.clips?.length > 0 && (
-                            <button className="px-5 py-2 rounded-xl bg-primary hover:bg-primary/90 text-white text-sm font-bold flex items-center gap-2 glow-primary transition-all">
-                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/></svg>
-                                Export All
-                            </button>
+                            <>
+                                <div className="flex items-center gap-1.5 rounded-xl bg-white/5 border border-white/10 p-1">
+                                    <select
+                                        value={relayoutMode}
+                                        onChange={(e) => setRelayoutMode(e.target.value)}
+                                        disabled={relayoutingAll}
+                                        className="bg-transparent text-xs font-semibold text-slate-200 px-2 py-1 focus:outline-none"
+                                    >
+                                        <option value="auto" className="bg-slate-900">Auto Detect</option>
+                                        <option value="podcast_split" className="bg-slate-900">Podcast Split-Screen</option>
+                                        <option value="podcast_switch" className="bg-slate-900">Podcast Active Speaker</option>
+                                        <option value="dynamic_zoom" className="bg-slate-900">Smart Face Track</option>
+                                        <option value="tutorial" className="bg-slate-900">Tutorial (Screen+Face)</option>
+                                        <option value="original" className="bg-slate-900">Original + Blur</option>
+                                    </select>
+                                    <button
+                                        type="button"
+                                        onClick={handleRelayoutAll}
+                                        disabled={relayoutingAll}
+                                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-bold text-white flex items-center gap-1.5 transition-colors"
+                                        title="Re-reframe all clips in this project (auto re-downloads YouTube source if deleted)"
+                                    >
+                                        {relayoutingAll ? (
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        ) : (
+                                            <LayoutTemplate className="h-3.5 w-3.5" />
+                                        )}
+                                        {relayoutingAll ? "Re-reframing…" : "Re-reframe All"}
+                                    </button>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowBatchYt(true)}
+                                    className="px-4 py-2 rounded-xl bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 text-red-300 hover:text-white text-sm font-bold flex items-center gap-2 transition-all"
+                                >
+                                    <Calendar className="h-4 w-4" />
+                                    Auto-Schedule YT
+                                </button>
+                                <a
+                                    href={getExportAllUrl(id)}
+                                    download
+                                    className="px-4 py-2 rounded-xl bg-primary hover:bg-primary/90 text-white text-sm font-bold flex items-center gap-2 glow-primary transition-all"
+                                >
+                                    <Archive className="h-4 w-4" />
+                                    Export All (.zip)
+                                </a>
+                            </>
                         )}
                     </div>
                 </div>
+
+                {relayoutMsg && (
+                    <div className={`rounded-2xl px-4 py-3 text-xs font-semibold border ${
+                        relayoutMsg.startsWith("✓")
+                            ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-300"
+                            : "bg-red-500/10 border-red-500/25 text-red-300"
+                    }`}>
+                        {relayoutMsg}
+                    </div>
+                )}
 
                 {/* Video Player */}
                 <div className="relative aspect-video rounded-3xl overflow-hidden glass border border-white/5 shadow-2xl bg-black">
@@ -144,7 +269,7 @@ export default function ProjectPage() {
                             src={`${getApiBaseUrl()}${selectedClip.file_path}`}
                             controls
                             className="w-full h-full object-contain"
-                            key={selectedClip.id}
+                            key={`${selectedClip.id}-${selectedClip.file_path}`}
                         />
                     ) : ytId ? (
                         <iframe
@@ -158,11 +283,13 @@ export default function ProjectPage() {
                             {isProcessing ? (
                                 <>
                                     <div className="h-10 w-10 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-                                    <p className="text-slate-400 text-sm">{STAGE_LABEL[wsProgress?.stage || project.status] || "Processing…"}</p>
+                                    <p className="text-slate-400 text-sm">
+                                        {STAGE_LABEL[wsProgress?.stage || project.status] || "Processing…"}
+                                    </p>
                                 </>
                             ) : (
                                 <div className="flex flex-col items-center gap-2 text-slate-600">
-                                    <svg className="h-12 w-12" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                    <Play className="h-12 w-12" />
                                     <p className="text-sm">No video available</p>
                                 </div>
                             )}
@@ -170,47 +297,105 @@ export default function ProjectPage() {
                     )}
                 </div>
 
-                {/* Failed run, or clips skipped: say why and offer to resume */}
-                {!isProcessing && (project.status === "error" || project.error_message) && (
-                    <div className={`glass-card rounded-2xl p-6 border ${project.status === "error" ? "border-red-500/20" : "border-amber-500/20"}`}>
-                        <div className="flex items-start gap-4">
-                            <div className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl ${project.status === "error" ? "bg-red-500/10 text-red-400" : "bg-amber-500/10 text-amber-400"}`}>
-                                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                {/* Selected Clip Insights Strip */}
+                {selectedClip && (
+                    <div className="glass-card rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-white/10">
+                        <div className="space-y-1.5 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <h2 className="text-base font-bold text-white truncate">
+                                    {selectedClip.title || "Selected Clip"}
+                                </h2>
+                                {selectedClip.layout_mode && (
+                                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-white/10 text-slate-300">
+                                        {selectedClip.layout_mode}
+                                    </span>
+                                )}
+                                {selectedClip.viral_score != null && (
+                                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-primary/20 text-indigo-300">
+                                        Viral {selectedClip.viral_score}/10
+                                    </span>
+                                )}
                             </div>
-                            <div className="min-w-0 flex-1">
-                                <p className="font-bold text-white">
-                                    {project.status === "error" ? "This project didn’t finish" : "Some clips were skipped"}
-                                </p>
-                                <p className="mt-1 text-sm text-slate-400 break-words">
-                                    {project.error_message || "Something went wrong while processing this video."}
-                                </p>
-                                <p className="mt-2 text-xs text-slate-500">Retry continues from the last finished step, so nothing already done is repeated.</p>
+                            {selectedClip.reason && (
+                                <p className="text-xs text-slate-400">{selectedClip.reason}</p>
+                            )}
+                            {selectedClip.hashtags && selectedClip.hashtags.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 pt-1">
+                                    {selectedClip.hashtags.map((h, i) => (
+                                        <span key={i} className="text-[11px] text-indigo-300 bg-primary/10 px-2 py-0.5 rounded-full">
+                                            {h}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
+                            {selectedClip.youtube_url ? (
+                                <a
+                                    href={selectedClip.youtube_url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="px-3.5 py-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs font-bold text-emerald-300 flex items-center gap-1.5"
+                                >
+                                    <CheckCircle2 className="h-3.5 w-3.5" />
+                                    On YouTube ({selectedClip.youtube_status || "posted"})
+                                </a>
+                            ) : (
                                 <button
                                     type="button"
-                                    onClick={handleRetry}
-                                    disabled={retrying}
-                                    className="mt-4 rounded-xl bg-primary px-5 py-2.5 text-sm font-bold text-white glow-primary hover:bg-primary/90 transition-all disabled:opacity-60"
+                                    onClick={() => setYtPublishClip(selectedClip)}
+                                    className="px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-xs font-bold text-white flex items-center gap-1.5 transition-colors"
                                 >
-                                    {retrying ? "Restarting…" : "Retry"}
+                                    <Youtube className="h-3.5 w-3.5" />
+                                    Post to YouTube
                                 </button>
-                            </div>
+                            )}
+                            <Link
+                                href={`/project/${id}/edit/${selectedClip.id}`}
+                                className="px-4 py-2.5 rounded-xl bg-primary hover:bg-primary/90 text-xs font-bold text-white flex items-center gap-1.5"
+                            >
+                                <Sliders className="h-3.5 w-3.5" />
+                                Open Studio Editor
+                            </Link>
+                            <a
+                                href={`${getApiBaseUrl()}${selectedClip.file_path}`}
+                                download
+                                className="px-3.5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-slate-200 flex items-center gap-1.5"
+                            >
+                                <Download className="h-3.5 w-3.5" />
+                                MP4
+                            </a>
                         </div>
                     </div>
                 )}
 
-                {/* Live Progress (when processing) */}
+                {/* Failed run */}
+                {!isProcessing && (project.status === "error" || project.error_message) && (
+                    <div className={`glass-card rounded-2xl p-6 border ${project.status === "error" ? "border-red-500/20" : "border-amber-500/20"}`}>
+                        <p className="font-bold text-white">
+                            {project.status === "error" ? "This project didn't finish" : "Some clips were skipped"}
+                        </p>
+                        <p className="mt-1 text-sm text-slate-400 break-words">
+                            {project.error_message || "Something went wrong while processing this video."}
+                        </p>
+                        <button
+                            type="button"
+                            onClick={handleRetry}
+                            disabled={retrying}
+                            className="mt-4 rounded-xl bg-primary px-5 py-2.5 text-sm font-bold text-white glow-primary hover:bg-primary/90 transition-all disabled:opacity-60"
+                        >
+                            {retrying ? "Restarting…" : "Retry"}
+                        </button>
+                    </div>
+                )}
+
+                {/* Live Progress */}
                 {isProcessing && (
                     <div className="glass-card rounded-2xl p-6 space-y-4">
                         <div className="flex justify-between items-center">
-                            <div className="flex items-center gap-2">
-                                <span className="relative flex h-2 w-2">
-                                    <span className="animate-ping absolute h-full w-full rounded-full bg-primary opacity-75" />
-                                    <span className="relative rounded-full h-2 w-2 bg-primary" />
-                                </span>
-                                <p className="text-slate-100 font-semibold text-sm">
-                                    {STAGE_LABEL[wsProgress?.stage || project.status] || "Processing…"}
-                                </p>
-                            </div>
+                            <p className="text-slate-100 font-semibold text-sm">
+                                {STAGE_LABEL[wsProgress?.stage || project.status] || "Processing…"}
+                            </p>
                             <p className="text-primary font-bold">{Math.round(clampedPct)}%</p>
                         </div>
                         <div className="h-2 w-full bg-white/5 rounded-full overflow-hidden">
@@ -224,9 +409,7 @@ export default function ProjectPage() {
                                 <span className="text-slate-600 italic">Connecting…</span>
                             ) : (
                                 logs.map((log, i) => (
-                                    <p key={i} className="text-slate-400">
-                                        <span className="text-accent-purple/60">[LOG]</span> {log}
-                                    </p>
+                                    <p key={i} className="text-slate-400">{log}</p>
                                 ))
                             )}
                         </div>
@@ -238,7 +421,7 @@ export default function ProjectPage() {
                     {[
                         { label: "Status", val: project.status.charAt(0).toUpperCase() + project.status.slice(1) },
                         { label: "Clips", val: `${project.clips?.length || 0} generated` },
-                        { label: "Source", val: ytId ? `YouTube: ${ytId}` : "Unknown" },
+                        { label: "Source", val: project.source_type === "upload" ? "Local Upload" : ytId ? `YouTube: ${ytId}` : "Video" },
                         { label: "Created", val: new Date(project.created_at).toLocaleDateString() },
                     ].map(({ label, val }) => (
                         <div key={label} className="glass rounded-2xl p-4">
@@ -248,19 +431,17 @@ export default function ProjectPage() {
                     ))}
                 </div>
 
-                <a href={project.youtube_url} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-sm text-primary hover:underline">
-                    <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24"><path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
-                    View original YouTube video
-                </a>
+                {ytId && (
+                    <a href={project.youtube_url} target="_blank" rel="noreferrer" className="text-sm text-primary hover:underline">
+                        View original YouTube video →
+                    </a>
+                )}
             </section>
 
             {/* Right: Clips Sidebar */}
-            <aside className="w-80 flex-shrink-0 border-l border-white/5 flex flex-col">
+            <aside className="w-84 max-w-[340px] w-full flex-shrink-0 border-l border-white/5 flex flex-col">
                 <div className="p-5 border-b border-white/5 glass-dark flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                        <svg className="h-5 w-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3l14 9-14 9V3z"/></svg>
-                        <h3 className="font-bold text-white">Generated Clips</h3>
-                    </div>
+                    <h3 className="font-bold text-white">Generated Clips</h3>
                     {project.clips?.length > 0 && (
                         <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-primary/20 text-primary border border-primary/30">
                             {project.clips.length} TOTAL
@@ -268,16 +449,12 @@ export default function ProjectPage() {
                     )}
                 </div>
 
-                <div className="flex-1 overflow-y-auto custom-scrollbar p-5 space-y-4">
-                    {project.clips?.length === 0 && (project.status === "done" || project.status === "error") ? (
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-3">
+                    {project.clips?.length === 0 ? (
                         <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-600">
-                            <svg className="h-10 w-10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"/></svg>
-                            <p className="text-sm">No clips generated</p>
-                        </div>
-                    ) : project.clips?.length === 0 ? (
-                        <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-600">
-                            <div className="h-6 w-6 rounded-full border-2 border-primary/40 border-t-primary animate-spin" />
-                            <p className="text-sm">Processing clips…</p>
+                            <p className="text-sm">
+                                {isProcessing ? "Processing clips…" : "No clips generated"}
+                            </p>
                         </div>
                     ) : (
                         project.clips.map((clip, i) => {
@@ -287,49 +464,50 @@ export default function ProjectPage() {
                                 <div
                                     key={clip.id}
                                     onClick={() => setSelectedClip(clip)}
-                                    className={`glass rounded-2xl p-4 flex gap-4 group cursor-pointer transition-all ${
-                                        isSelected ? "border border-primary/50 bg-primary/5" : "border border-transparent hover:border-primary/30"
+                                    className={`glass rounded-2xl p-3.5 flex gap-3.5 group cursor-pointer transition-all ${
+                                        isSelected ? "border border-primary/60 bg-primary/10" : "border border-white/5 hover:border-primary/30"
                                     }`}
                                 >
-                                    <div className="relative w-20 aspect-[9/16] rounded-xl overflow-hidden flex-shrink-0 bg-slate-900">
-                                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 group-hover:bg-black/20 transition-opacity">
-                                            <svg className={`h-6 w-6 ${isSelected ? "text-primary" : "text-white/60"}`} fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                                        </div>
-                                        <span className="absolute top-1.5 left-1.5 rounded px-1 py-0.5 text-[9px] font-bold bg-primary text-white">
+                                    <div className="relative w-16 aspect-[9/16] rounded-xl overflow-hidden flex-shrink-0 bg-slate-900 flex items-center justify-center">
+                                        <Play className={`h-5 w-5 ${isSelected ? "text-primary" : "text-white/50"}`} />
+                                        <span className="absolute top-1 left-1 rounded px-1 py-0.5 text-[9px] font-bold bg-primary text-white">
                                             {formatDuration(clip.duration)}
                                         </span>
                                     </div>
                                     <div className="flex-1 flex flex-col justify-between min-w-0">
                                         <div>
-                                            <div className="flex justify-between items-start gap-1">
-                                                <h4 className="text-xs font-bold text-white line-clamp-2 leading-snug">
-                                                    {clip.title || `Clip ${i + 1}`}
-                                                </h4>
-                                            </div>
-                                            {clip.viral_score !== undefined && (
-                                                <div className="mt-2 flex items-center gap-1.5">
-                                                    <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500">Viral:</span>
+                                            <h4 className="text-xs font-bold text-white line-clamp-2 leading-snug">
+                                                {clip.title || `Clip ${i + 1}`}
+                                            </h4>
+                                            {clip.viral_score != null && (
+                                                <div className="mt-1.5 flex items-center gap-1.5">
                                                     <div className="flex-1 h-1 bg-white/10 rounded-full">
-                                                        <div className="h-full rounded-full bg-gradient-to-r from-primary to-accent-purple" style={{ width: `${viralPct}%` }} />
+                                                        <div
+                                                            className="h-full rounded-full bg-gradient-to-r from-primary to-accent-purple"
+                                                            style={{ width: `${viralPct}%` }}
+                                                        />
                                                     </div>
-                                                    <span className="text-[9px] font-bold text-primary">{clip.viral_score}/10</span>
+                                                    <span className="text-[10px] font-bold text-indigo-300">
+                                                        {clip.viral_score}/10
+                                                    </span>
                                                 </div>
                                             )}
                                         </div>
-                                        <div className="flex gap-1.5 mt-3">
-                                            <button
-                                                onClick={e => { e.stopPropagation(); setSelectedClip(clip); }}
-                                                className="flex-1 py-1.5 rounded-lg bg-primary/10 hover:bg-primary text-[9px] font-bold transition-colors text-primary hover:text-white"
+                                        <div className="flex gap-1.5 mt-2.5">
+                                            <Link
+                                                href={`/project/${id}/edit/${clip.id}`}
+                                                onClick={(e) => e.stopPropagation()}
+                                                className="flex-1 py-1.5 rounded-lg bg-primary hover:bg-primary/90 text-[10px] font-bold text-center text-white transition-colors"
                                             >
-                                                PREVIEW
-                                            </button>
+                                                EDIT
+                                            </Link>
                                             <a
                                                 href={`${getApiBaseUrl()}${clip.file_path}`}
                                                 download
-                                                onClick={e => e.stopPropagation()}
-                                                className="flex-1 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-[9px] font-bold transition-colors border border-white/10 text-center"
+                                                onClick={(e) => e.stopPropagation()}
+                                                className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-[10px] font-bold border border-white/10 text-center"
                                             >
-                                                DOWNLOAD
+                                                MP4
                                             </a>
                                         </div>
                                     </div>
@@ -340,17 +518,35 @@ export default function ProjectPage() {
                 </div>
 
                 {project.status === "done" && (
-                    <div className="p-5 border-t border-white/5">
+                    <div className="p-4 border-t border-white/5">
                         <Link
                             href="/create"
-                            className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl bg-primary hover:bg-primary/90 text-white text-sm font-bold glow-primary transition-all"
+                            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary hover:bg-primary/90 text-white text-sm font-bold glow-primary transition-all"
                         >
-                            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-                            Generate More Clips
+                            + New Video Project
                         </Link>
                     </div>
                 )}
             </aside>
+
+            {ytPublishClip && (
+                <YouTubePublishModal
+                    mode="single"
+                    clip={ytPublishClip}
+                    onClose={() => setYtPublishClip(null)}
+                    onPublished={() => refreshProject()}
+                />
+            )}
+            {showBatchYt && (
+                <YouTubePublishModal
+                    mode="batch"
+                    projectId={id}
+                    clipCount={project.clips?.length || 0}
+                    unpostedCount={(project.clips || []).filter((c) => !c.youtube_video_id).length}
+                    onClose={() => setShowBatchYt(false)}
+                    onScheduled={() => refreshProject()}
+                />
+            )}
         </div>
     );
 }
