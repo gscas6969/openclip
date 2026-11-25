@@ -7,6 +7,7 @@ import {
     QuickToolResult,
     McpConfigInfo,
     CodexStatus,
+    ClaudeStatus,
     DiscoverNiche,
     TrendingVideo,
     AiScoutPick,
@@ -523,6 +524,16 @@ export async function getMcpConfig(): Promise<McpConfigInfo | null> {
 export async function getCodexStatus(): Promise<CodexStatus | null> {
     try {
         const res = await fetch(`${getBaseUrl()}/api/codex/status`, { cache: 'no-store' });
+        if (!res.ok) return null;
+        return res.json();
+    } catch {
+        return null;
+    }
+}
+
+export async function getClaudeStatus(): Promise<ClaudeStatus | null> {
+    try {
+        const res = await fetch(`${getBaseUrl()}/api/claude/status`, { cache: 'no-store' });
         if (!res.ok) return null;
         return res.json();
     } catch {

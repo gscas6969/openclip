@@ -11,10 +11,11 @@ import {
     saveSettings,
     getBrandKits,
     getCodexStatus,
+    getClaudeStatus,
     getApiBaseUrl,
     retryProject,
 } from "@/lib/api";
-import { BrandKit, Clip, CodexStatus, Settings } from "@/lib/types";
+import { BrandKit, Clip, CodexStatus, ClaudeStatus, Settings } from "@/lib/types";
 import { useProjectProgress } from "@/lib/websocket";
 import { SystemSetup } from "@/components/SystemSetup";
 import { Upload, Link2, Sliders, Sparkles } from "lucide-react";
@@ -88,6 +89,7 @@ export default function CreateProjectPage() {
     const [apiError, setApiError] = useState<string | null>(null);
     const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
     const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+    const [claudeStatus, setClaudeStatus] = useState<ClaudeStatus | null>(null);
     const [provider, setProvider] = useState<Settings["llm_provider"]>("codex");
     const [model, setModel] = useState("");
     const [failure, setFailure] = useState<string | null>(null);
@@ -100,13 +102,14 @@ export default function CreateProjectPage() {
     const { stage, percent, message, logs } = useProjectProgress(projectId, runKey);
 
     useEffect(() => {
-        Promise.all([getSettings(), getBrandKits(), getCodexStatus()])
-            .then(([s, kits, cx]) => {
+        Promise.all([getSettings(), getBrandKits(), getCodexStatus(), getClaudeStatus()])
+            .then(([s, kits, cx, cl]) => {
                 setHasApiKey(Boolean(s.has_api_key));
                 setProvider(s.llm_provider ?? "codex");
                 setModel(s.llm_model ?? "");
                 setBrandKits(kits);
                 setCodexStatus(cx);
+                setClaudeStatus(cl);
             })
             .catch(console.error);
     }, []);
@@ -207,7 +210,7 @@ export default function CreateProjectPage() {
         <div className="mx-auto w-full max-w-3xl px-6 py-12">
             {!isLive && <SystemSetup className="mb-8" />}
 
-            {hasApiKey === false && provider !== "ollama" && provider !== "codex" && (
+            {hasApiKey === false && provider !== "ollama" && provider !== "codex" && provider !== "claude" && (
                 <div className="mb-8 flex items-center justify-between gap-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 p-5">
                     <div className="flex items-center gap-3 text-amber-400">
                         <svg className="h-5 w-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -215,7 +218,7 @@ export default function CreateProjectPage() {
                         </svg>
                         <div>
                             <p className="font-bold text-sm">No LLM API key configured</p>
-                            <p className="text-xs opacity-80">Add an API key in Settings or switch provider to local Ollama.</p>
+                            <p className="text-xs opacity-80">Add an API key in Settings or switch provider to Codex, Claude CLI, or local Ollama.</p>
                         </div>
                     </div>
                     <Link href="/settings" className="flex-shrink-0 rounded-xl bg-amber-500/20 px-4 py-2 text-xs font-bold text-amber-400 hover:bg-amber-500/30 transition-colors">
@@ -490,39 +493,45 @@ export default function CreateProjectPage() {
                                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
                                     AI Provider
                                 </label>
-                                <div className="flex rounded-xl bg-slate-900/50 p-1 gap-1">
-                                    {(["codex", "openai", "anthropic", "gemini", "ollama"] as const).map((p) => (
+                                <div className="grid grid-cols-3 rounded-xl bg-slate-900/50 p-1 gap-1">
+                                    {(["codex", "claude", "openai", "anthropic", "gemini", "ollama"] as const).map((p) => (
                                         <button
                                             key={p}
                                             type="button"
                                             onClick={() => {
                                                 setProvider(p);
-                                                if (p === "codex") setModel("");
+                                                if (p === "codex" || p === "claude") setModel("");
                                                 else if (p === "openai") setModel("gpt-4o");
                                                 else if (p === "anthropic") setModel("claude-sonnet-5-5");
                                                 else if (p === "gemini") setModel("gemini-3.5-flash");
                                                 else if (p === "ollama") setModel("llama3");
                                             }}
-                                            className={`flex-1 py-1.5 text-[11px] font-bold rounded-lg transition-all ${
+                                            className={`py-1.5 text-[11px] font-bold rounded-lg transition-all ${
                                                 provider === p
                                                     ? "bg-primary text-white"
                                                     : "text-slate-400 hover:text-slate-200"
                                             }`}
                                         >
-                                            {p === "codex" ? "Codex" : p === "openai" ? "OpenAI" : p === "anthropic" ? "Claude" : p === "gemini" ? "Gemini" : "Ollama"}
+                                            {p === "codex" ? "Codex" : p === "claude" ? "Claude CLI" : p === "openai" ? "OpenAI" : p === "anthropic" ? "Anthropic" : p === "gemini" ? "Gemini" : "Ollama"}
                                         </button>
                                     ))}
                                 </div>
                             </div>
                             <div>
                                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                                    Model {provider === "codex" ? "(Optional)" : ""}
+                                    Model {provider === "codex" || provider === "claude" ? "(Optional)" : ""}
                                 </label>
                                 <input
                                     value={model}
                                     onChange={(e) => setModel(e.target.value)}
                                     className="w-full rounded-xl bg-slate-900/50 border border-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-primary focus:outline-none transition-all"
-                                    placeholder={provider === "codex" ? "Default Codex subscription model" : "gpt-4o"}
+                                    placeholder={
+                                        provider === "codex"
+                                            ? "Default Codex subscription model"
+                                            : provider === "claude"
+                                              ? "Default Claude model (e.g. sonnet, opus)"
+                                              : "gpt-4o"
+                                    }
                                 />
                             </div>
                         </div>
@@ -538,6 +547,20 @@ export default function CreateProjectPage() {
                                         : codexStatus.status_text}
                                 </span>
                                 {codexStatus.version && <span className="font-mono opacity-75">{codexStatus.version}</span>}
+                            </div>
+                        )}
+                        {provider === "claude" && claudeStatus && (
+                            <div className={`rounded-xl px-3.5 py-2 text-xs flex items-center justify-between border ${
+                                claudeStatus.logged_in
+                                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
+                                    : "bg-amber-500/10 border-amber-500/20 text-amber-300"
+                            }`}>
+                                <span>
+                                    {claudeStatus.logged_in
+                                        ? `✓ Claude Subscription Active (${claudeStatus.status_text})`
+                                        : claudeStatus.status_text}
+                                </span>
+                                {claudeStatus.version && <span className="font-mono opacity-75">{claudeStatus.version}</span>}
                             </div>
                         )}
                     </div>

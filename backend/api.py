@@ -1308,6 +1308,12 @@ async def get_codex_status():
     return await asyncio.to_thread(llm.check_codex_status)
 
 
+@app.get("/api/claude/status")
+async def get_claude_status():
+    """Check whether the official Claude Code CLI is installed and logged in."""
+    return await asyncio.to_thread(llm.check_claude_status)
+
+
 # ---------------------------------------------------------------------------
 # REST Routes — Trending Video Discovery & AI Scout
 # ---------------------------------------------------------------------------

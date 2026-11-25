@@ -149,7 +149,7 @@ export interface ProgressUpdate {
 }
 
 export interface Settings {
-    llm_provider: 'codex' | 'openai' | 'anthropic' | 'gemini' | 'ollama';
+    llm_provider: 'codex' | 'claude' | 'openai' | 'anthropic' | 'gemini' | 'ollama';
     llm_model: string;
     whisper_model: 'base' | 'small' | 'medium';
     has_api_key: boolean;
@@ -172,6 +172,13 @@ export interface EncoderStatus {
 }
 
 export interface CodexStatus {
+    installed: boolean;
+    version: string | null;
+    logged_in: boolean;
+    status_text: string;
+}
+
+export interface ClaudeStatus {
     installed: boolean;
     version: string | null;
     logged_in: boolean;

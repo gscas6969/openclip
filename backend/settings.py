@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MODELS = {
     "codex": "",
+    "claude": "",
     "openai": "gpt-4o",
     "anthropic": "claude-sonnet-5-5",
     "gemini": "gemini-3.5-flash",

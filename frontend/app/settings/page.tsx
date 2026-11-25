@@ -13,6 +13,7 @@ import {
     uploadLogoAsset,
     getMcpConfig,
     getCodexStatus,
+    getClaudeStatus,
     getYouTubeStatus,
     uploadYouTubeClientSecretFile,
     getYouTubeAuthUrl,
@@ -21,7 +22,7 @@ import {
     cleanupStorage,
     getApiBaseUrl,
 } from "@/lib/api";
-import { BrandKit, CodexStatus, Settings, CaptionStyle, McpConfigInfo, YouTubeStatus, StorageStats, EncoderStatus } from "@/lib/types";
+import { BrandKit, CodexStatus, ClaudeStatus, Settings, CaptionStyle, McpConfigInfo, YouTubeStatus, StorageStats, EncoderStatus } from "@/lib/types";
 import { Trash2, Upload, Plus, Copy, Check, Terminal, Youtube, HardDrive, Cpu } from "lucide-react";
 
 function formatSize(bytes: number): string {
@@ -64,6 +65,7 @@ export default function SettingsPage() {
     const [mcpConfig, setMcpConfig] = useState<McpConfigInfo | null>(null);
     const [mcpFormat, setMcpFormat] = useState<"codex" | "json">("codex");
     const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+    const [claudeStatus, setClaudeStatus] = useState<ClaudeStatus | null>(null);
     const [ytStatus, setYtStatus] = useState<YouTubeStatus | null>(null);
     const [ytMsg, setYtMsg] = useState<string | null>(null);
     const [ytBusy, setYtBusy] = useState(false);
@@ -81,8 +83,8 @@ export default function SettingsPage() {
             if (p === "connected") setYtMsg("✓ YouTube channel connected!");
             else if (p === "error") setYtMsg("YouTube OAuth failed — double-check your Redirect URI & Test User in Google Cloud.");
         }
-        Promise.all([getSettings(), getCaptionStyles(), getBrandKits(), getMcpConfig(), getCodexStatus(), getYouTubeStatus(), getStorageStats(), getEncoderStatus()])
-            .then(([data, styles, kits, mcp, cx, yt, st, enc]) => {
+        Promise.all([getSettings(), getCaptionStyles(), getBrandKits(), getMcpConfig(), getCodexStatus(), getClaudeStatus(), getYouTubeStatus(), getStorageStats(), getEncoderStatus()])
+            .then(([data, styles, kits, mcp, cx, cl, yt, st, enc]) => {
                 setProvider(data.llm_provider ?? "codex");
                 setModel(data.llm_model ?? "");
                 setWhisperModel(data.whisper_model ?? "base");
@@ -93,6 +95,7 @@ export default function SettingsPage() {
                 setBrandKits(kits);
                 setMcpConfig(mcp);
                 setCodexStatus(cx);
+                setClaudeStatus(cl);
                 setYtStatus(yt);
                 setStorage(st);
                 setEncoderStatus(enc);
@@ -103,7 +106,7 @@ export default function SettingsPage() {
 
     const handleProviderChange = (p: Settings["llm_provider"]) => {
         setProvider(p);
-        if (p === "codex") setModel("");
+        if (p === "codex" || p === "claude") setModel("");
         if (p === "openai") setModel("gpt-4o");
         if (p === "anthropic") setModel("claude-sonnet-5-5");
         if (p === "gemini") setModel("gemini-3.5-flash");
@@ -182,17 +185,17 @@ export default function SettingsPage() {
                             {/* LLM Provider */}
                             <section className="space-y-4">
                                 <h2 className="text-lg font-bold text-slate-100">LLM Provider</h2>
-                                <div className="flex p-1 bg-slate-900/50 rounded-xl gap-1">
-                                    {(["codex", "openai", "anthropic", "gemini", "ollama"] as const).map((p) => (
+                                <div className="grid grid-cols-3 sm:grid-cols-6 p-1 bg-slate-900/50 rounded-xl gap-1">
+                                    {(["codex", "claude", "openai", "anthropic", "gemini", "ollama"] as const).map((p) => (
                                         <button
                                             key={p}
                                             type="button"
                                             onClick={() => handleProviderChange(p)}
-                                            className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${
+                                            className={`py-2 text-sm font-bold rounded-lg transition-all ${
                                                 provider === p ? "bg-primary text-white" : "text-slate-400 hover:text-slate-100"
                                             }`}
                                         >
-                                            {p === "codex" ? "Codex" : p === "openai" ? "OpenAI" : p === "anthropic" ? "Anthropic" : p === "gemini" ? "Gemini" : "Ollama"}
+                                            {p === "codex" ? "Codex" : p === "claude" ? "Claude CLI" : p === "openai" ? "OpenAI" : p === "anthropic" ? "Anthropic" : p === "gemini" ? "Gemini" : "Ollama"}
                                         </button>
                                     ))}
                                 </div>
@@ -210,7 +213,21 @@ export default function SettingsPage() {
                                         {codexStatus.version && <span className="font-mono text-xs opacity-75">{codexStatus.version}</span>}
                                     </div>
                                 )}
-                                {provider !== "ollama" && provider !== "codex" && (
+                                {provider === "claude" && claudeStatus && (
+                                    <div className={`p-3.5 rounded-xl border text-sm flex items-center justify-between ${
+                                        claudeStatus.logged_in
+                                            ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
+                                            : "bg-amber-500/10 border-amber-500/20 text-amber-300"
+                                    }`}>
+                                        <span>
+                                            {claudeStatus.logged_in
+                                                ? `✓ ${claudeStatus.status_text} (uses your Claude subscription — no API key needed)`
+                                                : claudeStatus.status_text}
+                                        </span>
+                                        {claudeStatus.version && <span className="font-mono text-xs opacity-75">{claudeStatus.version}</span>}
+                                    </div>
+                                )}
+                                {provider !== "ollama" && provider !== "codex" && provider !== "claude" && (
                                     <div>
                                         <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
                                             API Key
@@ -235,12 +252,18 @@ export default function SettingsPage() {
                                 )}
                                 <div>
                                     <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                                        Model Name {provider === "codex" ? "(Leave blank for Codex default)" : ""}
+                                        Model Name {provider === "codex" ? "(Leave blank for Codex default)" : provider === "claude" ? "(Leave blank for Claude default, or e.g. sonnet / opus)" : ""}
                                     </label>
                                     <input
                                         value={model}
                                         onChange={(e) => setModel(e.target.value)}
-                                        placeholder={provider === "codex" ? "Auto (Codex subscription default)" : "gpt-4o"}
+                                        placeholder={
+                                            provider === "codex"
+                                                ? "Auto (Codex subscription default)"
+                                                : provider === "claude"
+                                                  ? "Auto (Claude subscription default)"
+                                                  : "gpt-4o"
+                                        }
                                         className="w-full bg-slate-900/50 border border-slate-800 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-500 focus:border-primary focus:outline-none text-sm"
                                     />
                                 </div>

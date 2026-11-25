@@ -580,6 +580,11 @@ def friendly_error(exc: BaseException) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
     if status in (401, 403):
+        msg_lower = str(exc).lower()
+        if "codex cli" in msg_lower:
+            return "Codex CLI is not logged in - run 'codex login' in a terminal"
+        if "claude cli" in msg_lower:
+            return "Claude CLI is not logged in - run 'claude auth login' in a terminal"
         return "the API key was rejected - check it in Settings"
     if status == 404:
         return "the model name was not found - check it in Settings"
@@ -672,6 +677,7 @@ def _retry_after_header(resp: httpx.Response) -> float:
 async def _call_provider_with_retry(provider: str, api_key: str, model: str, prompt: str) -> str:
     dispatch = {
         "codex": _call_codex,
+        "claude": _call_claude,
         "openai": _call_openai,
         "anthropic": _call_anthropic,
         "gemini": _call_gemini,
@@ -694,7 +700,7 @@ async def _call_provider_with_retry(provider: str, api_key: str, model: str, pro
 
 async def _call_openai(prompt: str, api_key: str, model: str) -> str:
     if not (api_key or "").strip():
-        raise ProviderError("OpenAI API key missing. Set it in Settings or switch provider to Codex.", status=401)
+        raise ProviderError("OpenAI API key missing. Set it in Settings or switch provider to Codex or Claude CLI.", status=401)
     model = model or "gpt-4o"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
@@ -716,7 +722,7 @@ async def _call_openai(prompt: str, api_key: str, model: str) -> str:
 
 async def _call_anthropic(prompt: str, api_key: str, model: str) -> str:
     if not (api_key or "").strip():
-        raise ProviderError("Anthropic API key missing. Set it in Settings or switch provider to Codex.", status=401)
+        raise ProviderError("Anthropic API key missing. Set it in Settings or switch provider to Claude CLI or Codex.", status=401)
     model = model or "claude-sonnet-5-5"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
@@ -921,6 +927,147 @@ async def _call_codex(prompt: str, api_key: str, model: str) -> str:
                     pass
 
     return await asyncio.to_thread(_run_codex)
+
+
+def _find_claude_exe() -> Optional[str]:
+    """Locate the official Anthropic Claude Code CLI binary on PATH."""
+    for name in ("claude.exe", "claude.cmd", "claude"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _claude_subprocess_env() -> dict:
+    """Return subprocess env configured to use the Claude subscription cleanly."""
+    env = os.environ.copy()
+    # Prevent an unrelated ANTHROPIC_API_KEY in the shell from overriding the user's
+    # Claude subscription login, and avoid nested-session guards if launched from Claude Code.
+    for key in ("ANTHROPIC_API_KEY", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+        env.pop(key, None)
+    return env
+
+
+def check_claude_status() -> dict:
+    """Inspect whether the official Claude Code CLI is installed and logged in."""
+    exe = _find_claude_exe()
+    if not exe:
+        return {
+            "installed": False,
+            "version": None,
+            "logged_in": False,
+            "status_text": "Claude CLI not installed (run: npm install -g @anthropic-ai/claude-code)",
+        }
+
+    env = _claude_subprocess_env()
+    version = None
+    try:
+        v_res = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10, env=env)
+        if v_res.returncode == 0:
+            version = v_res.stdout.strip()
+    except Exception:
+        pass
+
+    logged_in = False
+    status_text = "Not logged in (run: claude auth login)"
+    try:
+        l_res = subprocess.run([exe, "auth", "status"], capture_output=True, text=True, timeout=10, env=env)
+        raw_out = (l_res.stdout or "").strip()
+        combined = (raw_out or (l_res.stderr or "").strip())
+        parsed = None
+        if raw_out.startswith("{"):
+            try:
+                parsed = json.loads(raw_out)
+            except json.JSONDecodeError:
+                parsed = None
+
+        if isinstance(parsed, dict):
+            if parsed.get("loggedIn") is True:
+                logged_in = True
+                auth_method = str(parsed.get("authMethod") or "").strip()
+                sub_type = str(parsed.get("subscriptionType") or "").strip()
+                if auth_method and sub_type:
+                    status_text = f"Logged in via {auth_method} ({sub_type.capitalize()})"
+                elif auth_method:
+                    status_text = f"Logged in via {auth_method}"
+                else:
+                    status_text = "Logged in to Claude"
+            else:
+                status_text = "Not logged in (run: claude auth login)"
+        elif l_res.returncode == 0 and "logged in" in combined.lower() and "not logged in" not in combined.lower():
+            logged_in = True
+            status_text = combined
+        elif combined:
+            status_text = combined
+    except Exception as exc:
+        status_text = str(exc)
+
+    return {
+        "installed": True,
+        "version": version,
+        "logged_in": logged_in,
+        "status_text": status_text,
+    }
+
+
+async def _call_claude(prompt: str, api_key: str, model: str) -> str:
+    """
+    Invoke the official Claude Code CLI (`claude -p`) non-interactively using
+    the user's existing Claude subscription (no Anthropic API key needed).
+    """
+    exe = _find_claude_exe()
+    if not exe:
+        raise ProviderError(
+            "Claude CLI not found. Install it with: npm install -g @anthropic-ai/claude-code",
+            status=400,
+        )
+
+    def _run_claude() -> str:
+        cmd = [
+            exe,
+            "-p",
+            "--output-format", "text",
+            "--no-session-persistence",
+            "--tools", "",
+            "--disable-slash-commands",
+            "--permission-mode", "dontAsk",
+        ]
+        clean_model = (model or "").strip()
+        if clean_model and clean_model.lower() not in ("auto", "default"):
+            cmd.extend(["--model", clean_model])
+
+        logger.info("Calling Claude CLI (%s, model=%s, %d chars)", exe, clean_model or "default", len(prompt))
+        try:
+            res = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+                cwd=tempfile.gettempdir(),
+                env=_claude_subprocess_env(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ProviderError("Claude CLI timed out after 180s", status=504) from exc
+
+        output_text = (res.stdout or "").strip()
+        if res.returncode != 0:
+            err_msg = (res.stderr or res.stdout or "").strip()[-400:]
+            err_lower = err_msg.lower()
+            if any(k in err_lower for k in ("login", "not logged in", "auth", "401", "unauthorized", "credential")):
+                raise ProviderError(f"Claude CLI authentication error: {err_msg}", status=401)
+            if any(k in err_lower for k in ("rate limit", "429", "usage limit", "quota", "hit your limit", "overloaded", "529")):
+                raise ProviderError(f"Claude CLI rate limit: {err_msg}", status=429)
+            if "model" in err_lower and any(k in err_lower for k in ("not found", "invalid", "unknown", "404")):
+                raise ProviderError(f"Claude CLI model error: {err_msg}", status=404)
+            if not output_text:
+                raise ProviderError(f"Claude CLI failed (exit {res.returncode}): {err_msg}", status=500)
+
+        return output_text or "[]"
+
+    return await asyncio.to_thread(_run_claude)
 
 
 # ---------------------------------------------------------------------------
