@@ -1,17 +1,15 @@
 """
 speaker_detector.py — Active speaker detection using MediaPipe FaceLandmarker
 (per-face lip movement mapped accurately to detected face bounding boxes)
-with FFmpeg audio RMS fallback and hysteresis hold.
+with spatial face tracking and hysteresis hold.
 """
 
 import os
-import subprocess
 import math
-from typing import Any, List, Tuple
+from typing import Any, List, Optional
 import numpy as np  # type: ignore
 from PIL import Image  # type: ignore
 
-import ffbin  # type: ignore
 import mediapipe as mp  # type: ignore
 from mediapipe.tasks import python  # type: ignore
 from mediapipe.tasks.python import vision  # type: ignore
@@ -32,10 +30,90 @@ base_options = python.BaseOptions(model_asset_path=model_path)
 options = vision.FaceLandmarkerOptions(
     base_options=base_options,
     num_faces=6,
-    min_face_detection_confidence=0.25,
-    min_face_presence_confidence=0.25,
+    min_face_detection_confidence=0.35,
+    min_face_presence_confidence=0.35,
 )
 face_landmarker = vision.FaceLandmarker.create_from_options(options)
+
+
+def _box_iou(a: dict, b: dict) -> float:
+    ax1, ay1 = float(a["cx"]) - float(a["w"]) / 2.0, float(a["cy"]) - float(a["h"]) / 2.0
+    ax2, ay2 = float(a["cx"]) + float(a["w"]) / 2.0, float(a["cy"]) + float(a["h"]) / 2.0
+    bx1, by1 = float(b["cx"]) - float(b["w"]) / 2.0, float(b["cy"]) - float(b["h"]) / 2.0
+    bx2, by2 = float(b["cx"]) + float(b["w"]) / 2.0, float(b["cy"]) + float(b["h"]) / 2.0
+
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1.0, (bx2 - bx1) * (by2 - by1))
+    return inter / max(1.0, area_a + area_b - inter)
+
+
+def detect_faces_with_mouth_scores_rgb(
+    rgb: np.ndarray,
+    vid_width: int,
+    vid_height: int,
+    offset_x: int = 0,
+    offset_y: int = 0,
+) -> List[dict]:
+    """
+    Run FaceLandmarker on an RGB numpy array (full frame or cropped tile) and map
+    face bounding boxes + normalized mouth-opening scores back to full-frame coords.
+    """
+    if rgb.size == 0:
+        return []
+    tile_h, tile_w = rgb.shape[:2]
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+    mesh_result = face_landmarker.detect(mp_image)
+    if not mesh_result.face_landmarks:
+        return []
+
+    raw_found: List[dict] = []
+    for lms in mesh_result.face_landmarks:
+        xs = [offset_x + p.x * tile_w for p in lms]
+        ys = [offset_y + p.y * tile_h for p in lms]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        fw = max(1.0, max_x - min_x)
+        fh = max(1.0, max_y - min_y)
+        size = fh / max(vid_height, 1)
+        aspect = fw / fh
+        if size < 0.03 or size > 0.56:
+            continue
+        if aspect < 0.42 or aspect > 1.85:
+            continue
+
+        # Inner lips: upper lip bottom (13) and lower lip top (14)
+        mouth_open = abs(lms[14].y - lms[13].y) * tile_h / fh
+        raw_found.append({
+            "cx": (min_x + max_x) / 2.0,
+            "cy": (min_y + max_y) / 2.0,
+            "w": fw,
+            "h": fh,
+            "size": size,
+            "mouth": float(mouth_open),
+            "has_landmarks": True,
+            "source": "lm",
+            "score": 0.90,
+        })
+
+    # Size-aware deduplication in case FaceLandmarker emits overlapping boxes on one face
+    deduped: List[dict] = []
+    for f in sorted(raw_found, key=lambda d: (-d["size"], d["cy"])):
+        is_dup = False
+        for ex in deduped:
+            dist = math.hypot(f["cx"] - ex["cx"], f["cy"] - ex["cy"])
+            max_dim = max(f["w"], f["h"], ex["w"], ex["h"])
+            if _box_iou(f, ex) > 0.22 or dist < max(48.0, 0.58 * max_dim):
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(f)
+
+    return deduped
 
 
 def detect_faces_with_mouth_scores(
@@ -48,35 +126,7 @@ def detect_faces_with_mouth_scores(
     and compute each face's normalized mouth-opening score (lip distance / face height).
     """
     rgb = np.array(frame.convert("RGB"))
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    mesh_result = face_landmarker.detect(mp_image)
-    if not mesh_result.face_landmarks:
-        return []
-
-    found: List[dict] = []
-    for lms in mesh_result.face_landmarks:
-        xs = [p.x * vid_width for p in lms]
-        ys = [p.y * vid_height for p in lms]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        fw = max(1.0, max_x - min_x)
-        fh = max(1.0, max_y - min_y)
-        size = fh / max(vid_height, 1)
-        if size < 0.028:
-            continue
-
-        # Inner lips: upper lip bottom (13) and lower lip top (14)
-        mouth_open = abs(lms[14].y - lms[13].y) * vid_height / fh
-        # Outer lips width vs height adds robustness for talking motion
-        found.append({
-            "cx": (min_x + max_x) / 2.0,
-            "cy": (min_y + max_y) / 2.0,
-            "w": fw,
-            "h": fh,
-            "size": size,
-            "mouth": float(mouth_open),
-        })
-    return found
+    return detect_faces_with_mouth_scores_rgb(rgb, vid_width, vid_height)
 
 
 def pick_active_faces_per_second(
@@ -85,35 +135,56 @@ def pick_active_faces_per_second(
     vid_width: int,
     vid_height: int,
     hold_seconds: int = 2,
-) -> List[dict | None]:
+    sample_fps: float = 1.0,
+) -> List[Optional[dict]]:
     """
-    For each sampled second, choose ONE target face to frame:
+    For each sampled frame, choose ONE target face to frame:
       - 0 faces -> None
       - 1 face  -> that face
       - 2+ faces -> track lip-opening activity (mouth openness + frame-to-frame
-        mouth delta) with hysteresis hold so the camera stays locked on the
-        active speaker and NEVER hovers in the empty center between speakers.
+        mouth delta) using stable spatial speaker tracks with hysteresis hold
+        so the camera stays locked on the active speaker and NEVER hovers in
+        the empty center between speakers.
     """
     if not face_data:
         return []
 
-    # Track recent mouth readings by coarse X-slot (left/mid/right bucket) to compute lip motion delta
-    prev_mouth_by_slot: dict[int, float] = {}
-    raw_chosen: List[dict | None] = []
-    raw_slot: List[int] = []
+    # Maintain persistent spatial speaker tracks (id -> {cx, mouth}) so leaning across
+    # an arbitrary x=0.25/0.50 grid line never triggers a false speaker switch.
+    tracks: list[dict[str, float]] = []
+    track_match_radius = max(80.0, vid_width * 0.16)
+
+    def _match_or_create_track(face: dict) -> int:
+        cx = float(face["cx"])
+        best_tid = -1
+        best_dist = track_match_radius
+        for tid, tr in enumerate(tracks):
+            d = abs(cx - tr["cx"])
+            if d < best_dist:
+                best_dist = d
+                best_tid = tid
+        if best_tid == -1:
+            tracks.append({"cx": cx, "mouth": float(face.get("mouth", 0.0))})
+            return len(tracks) - 1
+        # Gently update track anchor
+        tracks[best_tid]["cx"] = tracks[best_tid]["cx"] * 0.75 + cx * 0.25
+        return best_tid
+
+    raw_track_ids: List[int] = []
+    enriched_all: List[List[dict]] = []
 
     for i, faces in enumerate(face_data):
         if not faces:
-            raw_chosen.append(None)
-            raw_slot.append(-1)
+            enriched_all.append([])
+            raw_track_ids.append(-1)
             continue
 
         if len(faces) == 1:
             f = faces[0]
-            slot = int(min(3, max(0, (f["cx"] / max(vid_width, 1)) * 4)))
-            prev_mouth_by_slot[slot] = float(f.get("mouth", 0.0))
-            raw_chosen.append(f)
-            raw_slot.append(slot)
+            tid = _match_or_create_track(f)
+            tracks[tid]["mouth"] = float(f.get("mouth", 0.0))
+            enriched_all.append([f])
+            raw_track_ids.append(tid)
             continue
 
         # 2+ faces in frame: enrich with mouth scores if missing
@@ -125,46 +196,48 @@ def pick_active_faces_per_second(
                 for f in faces:
                     best_lm = min(lm_faces, key=lambda lm: math.hypot(lm["cx"] - f["cx"], lm["cy"] - f["cy"]))
                     if math.hypot(best_lm["cx"] - f["cx"], best_lm["cy"] - f["cy"]) < vid_width * 0.12:
-                        enriched.append({**f, "mouth": best_lm["mouth"]})
+                        enriched.append({**f, "mouth": best_lm["mouth"], "has_landmarks": True})
                     else:
                         enriched.append({**f, "mouth": 0.0})
+        enriched_all.append(enriched)
 
-        best_face = enriched[0]
         best_score = -1.0
-        best_slot = 0
+        best_tid = 0
 
         for f in enriched:
-            slot = int(min(3, max(0, (f["cx"] / max(vid_width, 1)) * 4)))
+            tid = _match_or_create_track(f)
             mouth = float(f.get("mouth", 0.0))
-            prev_m = prev_mouth_by_slot.get(slot, mouth)
+            prev_m = tracks[tid]["mouth"]
             mouth_delta = abs(mouth - prev_m)
-            prev_mouth_by_slot[slot] = mouth
+            tracks[tid]["mouth"] = mouth
 
-            # Speaking score = lip openness + lip movement delta + slight foreground size tie-breaker
-            speak_score = (mouth * 2.5) + (mouth_delta * 4.0) + (float(f.get("size", 0.1)) * 0.35)
+            lm_bonus = 0.08 if f.get("has_landmarks") else 0.0
+            # Speaking score = lip openness + lip movement delta + landmark preference + subtle size tie-breaker
+            speak_score = (mouth * 2.5) + (mouth_delta * 4.5) + lm_bonus + (float(f.get("size", 0.1)) * 0.25)
             if speak_score > best_score:
                 best_score = speak_score
-                best_face = f
-                best_slot = slot
+                best_tid = tid
 
-        raw_chosen.append(best_face)
-        raw_slot.append(best_slot)
+        raw_track_ids.append(best_tid)
 
-    # Apply hysteresis hold across slots so we don't ping-pong every 1 second
-    locked_slots = _apply_speaker_hold(raw_slot, hold_seconds=hold_seconds)
-    result: List[dict | None] = []
-    for i, faces in enumerate(face_data):
+    hold_samples = max(1, int(round(hold_seconds * max(0.5, sample_fps))))
+    locked_tids = _apply_speaker_hold(raw_track_ids, hold_seconds=hold_samples)
+
+    result: List[Optional[dict]] = []
+    for i, faces in enumerate(enriched_all):
         if not faces:
             result.append(None)
             continue
         if len(faces) == 1:
             result.append(faces[0])
             continue
-        target_slot = locked_slots[i]
-        # Pick the face closest to the locked speaker slot
-        slot_center_x = ((target_slot + 0.5) / 4.0) * vid_width if target_slot >= 0 else vid_width * 0.5
-        match = min(faces, key=lambda f: abs(f["cx"] - slot_center_x))
-        result.append(match)
+        target_tid = locked_tids[i]
+        if 0 <= target_tid < len(tracks):
+            target_cx = tracks[target_tid]["cx"]
+            match = min(faces, key=lambda f: abs(float(f["cx"]) - target_cx))
+            result.append(match)
+        else:
+            result.append(max(faces, key=lambda f: float(f.get("mouth", 0.0)) + float(f.get("size", 0.0)) * 0.25))
 
     return result
 

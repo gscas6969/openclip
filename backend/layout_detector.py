@@ -2,6 +2,7 @@
 layout_detector.py — Smart multi-speaker & screen-share layout classifier.
 """
 
+import math
 import numpy as np  # type: ignore
 from PIL import Image  # type: ignore
 from typing import Any
@@ -110,7 +111,22 @@ def _majority_face_count(face_data: list[list[dict[str, Any]]]) -> int:
 
 
 def _filter_false_positives(face_data: list[list[dict[str, Any]]]) -> list[list[dict[str, Any]]]:
-    return [[f for f in frame_faces if f["size"] >= 0.028] for frame_faces in face_data]
+    return [[f for f in frame_faces if 0.03 <= float(f["size"]) <= 0.56] for frame_faces in face_data]
+
+
+def _box_iou(a: dict[str, Any], b: dict[str, Any]) -> float:
+    aw = float(a.get("w", a.get("h", 80.0)))
+    ah = float(a.get("h", aw))
+    bw = float(b.get("w", b.get("h", 80.0)))
+    bh = float(b.get("h", bw))
+    ax1, ay1 = float(a["cx"]) - aw / 2.0, float(a["cy"]) - ah / 2.0
+    ax2, ay2 = float(a["cx"]) + aw / 2.0, float(a["cy"]) + ah / 2.0
+    bx1, by1 = float(b["cx"]) - bw / 2.0, float(b["cy"]) - bh / 2.0
+    bx2, by2 = float(b["cx"]) + bw / 2.0, float(b["cy"]) + bh / 2.0
+    inter = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+    if inter <= 0.0:
+        return 0.0
+    return inter / max(1.0, aw * ah + bw * bh - inter)
 
 
 def _deduplicate_faces(face_data: list[list[dict[str, Any]]]) -> list[list[dict[str, Any]]]:
@@ -118,10 +134,17 @@ def _deduplicate_faces(face_data: list[list[dict[str, Any]]]) -> list[list[dict[
     for frame_faces in face_data:
         unique: list[dict[str, Any]] = []
         for face in frame_faces:
-            if not any(
-                ((face["cx"] - ex["cx"]) ** 2 + (face["cy"] - ex["cy"]) ** 2) ** 0.5 < 50
-                for ex in unique
-            ):
+            fw = float(face.get("w", face.get("h", 80.0)))
+            fh = float(face.get("h", fw))
+            is_dup = False
+            for ex in unique:
+                ew = float(ex.get("w", ex.get("h", 80.0)))
+                eh = float(ex.get("h", ew))
+                dist = math.hypot(float(face["cx"]) - float(ex["cx"]), float(face["cy"]) - float(ex["cy"]))
+                if _box_iou(face, ex) > 0.20 or dist < max(55.0, 0.60 * max(fw, fh, ew, eh)):
+                    is_dup = True
+                    break
+            if not is_dup:
                 unique.append(face)
         cleaned.append(unique)
     return cleaned
@@ -136,12 +159,15 @@ def _check_consistent_face_sides(
     if len(two_face_frames) < 2:
         return False
 
-    min_pixel_gap = max(80.0, vid_width * 0.18)
+    min_pixel_gap = max(100.0, vid_width * 0.24)
     separated = 0
     for frame in two_face_frames:
         ordered = sorted(frame, key=lambda f: float(f["cx"]))
-        gap = float(ordered[-1]["cx"]) - float(ordered[0]["cx"])
-        if gap >= min_pixel_gap:
+        left_f, right_f = ordered[0], ordered[-1]
+        gap = float(right_f["cx"]) - float(left_f["cx"])
+        on_opposite_halves = float(left_f["cx"]) < vid_width * 0.48 and float(right_f["cx"]) > vid_width * 0.52
+        not_giant_closeup = max(float(left_f.get("size", 0.0)), float(right_f.get("size", 0.0))) < 0.30
+        if gap >= min_pixel_gap and on_opposite_halves and not_giant_closeup:
             separated += 1
 
     return (separated / len(two_face_frames)) >= 0.55
