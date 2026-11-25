@@ -154,6 +154,21 @@ export interface Settings {
     whisper_model: 'base' | 'small' | 'medium';
     has_api_key: boolean;
     caption_style: string;
+    video_encoder?: string;
+}
+
+export interface EncoderOption {
+    id: string;
+    label: string;
+    kind: 'gpu' | 'cpu';
+}
+
+export interface EncoderStatus {
+    preferred: string;
+    active: string;
+    active_label: string;
+    gpu_available: boolean;
+    available: EncoderOption[];
 }
 
 export interface CodexStatus {

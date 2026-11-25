@@ -355,15 +355,18 @@ async def _reframe_original_blur(input_path: str, output_path: str) -> bool:
         "[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[outv]"
     )
-    cmd = [
+    prefix_cmd = [
         ffbin.ffmpeg(), "-y", "-i", input_path,
         "-filter_complex", filter_cx,
         "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    ]
+    suffix_cmd = [
         "-c:a", "aac", "-b:a", "192k",
         output_path,
     ]
-    res = await asyncio.to_thread(_run, cmd, 900)
+    res = await asyncio.to_thread(
+        ffbin.run_ffmpeg_encode, prefix_cmd, suffix_cmd, quality="standard", timeout=900, text=False
+    )
     return res.returncode == 0
 
 
@@ -597,15 +600,18 @@ async def _reframe_podcast_split(
         filter_parts.append(f"{''.join(concat_inputs)}concat=n={len(segments)}:v=1:a=0[outv]")
         filter_cx = ";".join(filter_parts)
 
-    cmd = [
+    prefix_cmd = [
         ffbin.ffmpeg(), "-y", "-i", input_path,
         "-filter_complex", filter_cx,
         "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    ]
+    suffix_cmd = [
         "-c:a", "aac", "-b:a", "192k",
         output_path,
     ]
-    res = await asyncio.to_thread(_run, cmd, 900)
+    res = await asyncio.to_thread(
+        ffbin.run_ffmpeg_encode, prefix_cmd, suffix_cmd, quality="standard", timeout=900, text=False
+    )
     if res.returncode != 0:
         logger.error("podcast_split FFmpeg failed: %s", res.stderr.decode(errors="replace")[-1200:])
         return False
@@ -658,15 +664,18 @@ async def _reframe_tutorial(
         f"[0:v]crop={fc_w}:{fc_h}:{fx}:{fy},scale=1080:740:force_original_aspect_ratio=increase,crop=1080:740[bot];"
         f"[top][bot]vstack=inputs=2,setsar=1[outv]"
     )
-    cmd = [
+    prefix_cmd = [
         ffbin.ffmpeg(), "-y", "-i", input_path,
         "-filter_complex", filter_cx,
         "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    ]
+    suffix_cmd = [
         "-c:a", "aac", "-b:a", "192k",
         output_path,
     ]
-    res = await asyncio.to_thread(_run, cmd, 900)
+    res = await asyncio.to_thread(
+        ffbin.run_ffmpeg_encode, prefix_cmd, suffix_cmd, quality="standard", timeout=900, text=False
+    )
     return res.returncode == 0
 
 
@@ -838,16 +847,19 @@ async def _reframe_dynamic_zoom(
         f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1"
     )
 
-    cmd = [
+    prefix_cmd = [
         ffbin.ffmpeg(), "-y", "-i", input_path,
         "-vf", filter_cx,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    ]
+    suffix_cmd = [
         "-c:a", "aac", "-b:a", "192k",
         output_path,
     ]
 
     try:
-        result = await asyncio.to_thread(_run, cmd, 900)
+        result = await asyncio.to_thread(
+            ffbin.run_ffmpeg_encode, prefix_cmd, suffix_cmd, quality="standard", timeout=900, text=False
+        )
     except RuntimeError as exc:
         logger.error("FFmpeg dynamic sendcmd reframe failed: %s", exc)
         return False, overall_face_count
@@ -887,14 +899,17 @@ async def _reframe_static_fallback(
         f"scale=1080:1920:force_original_aspect_ratio=decrease,"
         f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1"
     )
-    cmd = [
+    prefix_cmd = [
         ffbin.ffmpeg(), "-y", "-i", input_path,
         "-vf", filter_cx,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    ]
+    suffix_cmd = [
         "-c:a", "aac", "-b:a", "192k",
         output_path,
     ]
-    result = await asyncio.to_thread(_run, cmd, 900)
+    result = await asyncio.to_thread(
+        ffbin.run_ffmpeg_encode, prefix_cmd, suffix_cmd, quality="standard", timeout=900, text=False
+    )
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg static fallback reframe failed: {result.stderr.decode(errors='replace')[-500:]}")
 
@@ -926,7 +941,6 @@ async def _cut_raw_clip(video_path: str, start: float, end: float, output_path: 
         "-ss", f"{start:.3f}",
         "-i", video_path,
         "-t", f"{duration:.3f}",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
     ]
     tail_cmd = [
         "-c:a", "aac", "-b:a", "192k",
@@ -938,14 +952,26 @@ async def _cut_raw_clip(video_path: str, start: float, end: float, output_path: 
         fade_out_d = 0.08
         fade_out_st = max(0.0, duration - fade_out_d)
         af = f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.025,afade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}"
-        cmd = base_cmd + ["-af", af] + tail_cmd
-        result = await asyncio.to_thread(_run, cmd, 300, True)
+        result = await asyncio.to_thread(
+            ffbin.run_ffmpeg_encode,
+            base_cmd,
+            ["-af", af, *tail_cmd],
+            quality="fast",
+            timeout=300,
+            text=True,
+        )
         if result.returncode == 0:
             return
         # Fallback without audio filter (e.g. silent video with no audio stream)
         logger.debug("Raw clip cut with audio fade failed, retrying without -af: %s", result.stderr[-250:])
 
-    cmd = base_cmd + tail_cmd
-    result = await asyncio.to_thread(_run, cmd, 300, True)
+    result = await asyncio.to_thread(
+        ffbin.run_ffmpeg_encode,
+        base_cmd,
+        tail_cmd,
+        quality="fast",
+        timeout=300,
+        text=True,
+    )
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed cutting raw clip: {result.stderr[-500:]}")

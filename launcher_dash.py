@@ -640,10 +640,13 @@ class OpenClipDashboard:
         npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
         self.frontend_starting = True
         self._emit_log("SYSTEM", f"Starting Frontend on port {FRONTEND_PORT}…")
+        fe_env = os.environ.copy()
+        fe_env["BROWSERSLIST_IGNORE_OLD_DATA"] = "1"
         try:
             self.frontend_proc = subprocess.Popen(
                 [npm_cmd, "run", "dev"],
                 cwd=FRONTEND_DIR,
+                env=fe_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

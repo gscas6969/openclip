@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
     getSettings,
     saveSettings,
+    getEncoderStatus,
     getCaptionStyles,
     getBrandKits,
     createBrandKit,
@@ -20,8 +21,8 @@ import {
     cleanupStorage,
     getApiBaseUrl,
 } from "@/lib/api";
-import { BrandKit, CodexStatus, Settings, CaptionStyle, McpConfigInfo, YouTubeStatus, StorageStats } from "@/lib/types";
-import { Trash2, Upload, Plus, Copy, Check, Terminal, Youtube, HardDrive } from "lucide-react";
+import { BrandKit, CodexStatus, Settings, CaptionStyle, McpConfigInfo, YouTubeStatus, StorageStats, EncoderStatus } from "@/lib/types";
+import { Trash2, Upload, Plus, Copy, Check, Terminal, Youtube, HardDrive, Cpu } from "lucide-react";
 
 function formatSize(bytes: number): string {
     if (!bytes) return "0 MB";
@@ -45,6 +46,8 @@ export default function SettingsPage() {
     const [provider, setProvider] = useState<Settings["llm_provider"]>("openai");
     const [model, setModel] = useState("gpt-4o");
     const [whisperModel, setWhisperModel] = useState<Settings["whisper_model"]>("base");
+    const [videoEncoder, setVideoEncoder] = useState<string>("auto");
+    const [encoderStatus, setEncoderStatus] = useState<EncoderStatus | null>(null);
     const [captionStyle, setCaptionStyle] = useState("mozi_pop");
     const [captionStylesList, setCaptionStylesList] = useState<CaptionStyle[]>([]);
     const [presetCat, setPresetCat] = useState<"all" | "kinetic" | "clean" | "vibrant">("all");
@@ -78,11 +81,12 @@ export default function SettingsPage() {
             if (p === "connected") setYtMsg("✓ YouTube channel connected!");
             else if (p === "error") setYtMsg("YouTube OAuth failed — double-check your Redirect URI & Test User in Google Cloud.");
         }
-        Promise.all([getSettings(), getCaptionStyles(), getBrandKits(), getMcpConfig(), getCodexStatus(), getYouTubeStatus(), getStorageStats()])
-            .then(([data, styles, kits, mcp, cx, yt, st]) => {
+        Promise.all([getSettings(), getCaptionStyles(), getBrandKits(), getMcpConfig(), getCodexStatus(), getYouTubeStatus(), getStorageStats(), getEncoderStatus()])
+            .then(([data, styles, kits, mcp, cx, yt, st, enc]) => {
                 setProvider(data.llm_provider ?? "codex");
                 setModel(data.llm_model ?? "");
                 setWhisperModel(data.whisper_model ?? "base");
+                setVideoEncoder(data.video_encoder || "auto");
                 setCaptionStyle(data.caption_style || "mozi_pop");
                 setHasApiKey(Boolean(data.has_api_key));
                 setCaptionStylesList(styles);
@@ -91,6 +95,7 @@ export default function SettingsPage() {
                 setCodexStatus(cx);
                 setYtStatus(yt);
                 setStorage(st);
+                setEncoderStatus(enc);
             })
             .catch(() => setError("Failed to load settings."))
             .finally(() => setLoading(false));
@@ -116,9 +121,12 @@ export default function SettingsPage() {
                 llm_model: model,
                 whisper_model: whisperModel,
                 caption_style: captionStyle,
+                video_encoder: videoEncoder,
             };
             if (editingKey || (!hasApiKey && apiKey)) payload.llm_api_key = apiKey;
             await saveSettings(payload);
+            const updatedEnc = await getEncoderStatus();
+            if (updatedEnc) setEncoderStatus(updatedEnc);
             setSavedStatus("Settings saved!");
             if (payload.llm_api_key) setHasApiKey(true);
             setEditingKey(false);
@@ -257,6 +265,74 @@ export default function SettingsPage() {
                                             <p className="text-xs text-slate-500 mt-1">{opt.desc}</p>
                                         </button>
                                     ))}
+                                </div>
+                            </section>
+
+                            {/* Hardware Video Encoding */}
+                            <section className="space-y-4">
+                                <div className="flex items-center justify-between flex-wrap gap-2">
+                                    <div className="flex items-center gap-2">
+                                        <Cpu className="h-4 w-4 text-primary" />
+                                        <h2 className="text-lg font-bold text-slate-100">Video Encoder (GPU Acceleration)</h2>
+                                    </div>
+                                    {encoderStatus && (
+                                        <span
+                                            className={`px-2.5 py-1 rounded-full text-xs font-bold border ${
+                                                encoderStatus.active !== "libx264"
+                                                    ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-300"
+                                                    : "bg-slate-800/80 border-slate-700 text-slate-300"
+                                            }`}
+                                        >
+                                            Active: {encoderStatus.active_label}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => setVideoEncoder("auto")}
+                                        className={`p-4 rounded-xl text-left border transition-all ${
+                                            videoEncoder === "auto"
+                                                ? "border-[var(--success)] bg-[var(--success)]/5"
+                                                : "border-slate-800 bg-slate-900/30 hover:border-slate-700"
+                                        }`}
+                                    >
+                                        <p className="font-bold text-slate-100 text-sm">Auto (Recommended)</p>
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            {encoderStatus?.gpu_available
+                                                ? `Uses ${encoderStatus.available.find((e) => e.kind === "gpu")?.label} with CPU fallback`
+                                                : "Uses GPU when detected, else CPU"}
+                                        </p>
+                                    </button>
+                                    {(encoderStatus?.available || [])
+                                        .filter((e) => e.kind === "gpu")
+                                        .map((opt) => (
+                                            <button
+                                                key={opt.id}
+                                                type="button"
+                                                onClick={() => setVideoEncoder(opt.id)}
+                                                className={`p-4 rounded-xl text-left border transition-all ${
+                                                    videoEncoder === opt.id
+                                                        ? "border-[var(--success)] bg-[var(--success)]/5"
+                                                        : "border-slate-800 bg-slate-900/30 hover:border-slate-700"
+                                                }`}
+                                            >
+                                                <p className="font-bold text-slate-100 text-sm">{opt.label}</p>
+                                                <p className="text-xs text-slate-500 mt-1">Hardware GPU ({opt.id})</p>
+                                            </button>
+                                        ))}
+                                    <button
+                                        type="button"
+                                        onClick={() => setVideoEncoder("cpu")}
+                                        className={`p-4 rounded-xl text-left border transition-all ${
+                                            videoEncoder === "cpu"
+                                                ? "border-[var(--success)] bg-[var(--success)]/5"
+                                                : "border-slate-800 bg-slate-900/30 hover:border-slate-700"
+                                        }`}
+                                    >
+                                        <p className="font-bold text-slate-100 text-sm">CPU Only (libx264)</p>
+                                        <p className="text-xs text-slate-500 mt-1">Software encoding fallback</p>
+                                    </button>
                                 </div>
                             </section>
 

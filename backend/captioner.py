@@ -1053,17 +1053,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 async def _burn_ass_to_video(input_path: str, ass_path: str, output_path: str) -> None:
     safe_ass_path = ass_path.replace("\\", "/").replace(":", "\\:")
-    cmd = [
+    prefix_cmd = [
         ffbin.ffmpeg(), "-y",
         "-i", input_path,
         "-vf", f"ass='{safe_ass_path}'",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    ]
+    suffix_cmd = [
         "-c:a", "copy",
         output_path,
     ]
 
     def _run_ffmpeg() -> tuple[int, str]:
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+        res = ffbin.run_ffmpeg_encode(
+            prefix_cmd,
+            suffix_cmd,
+            quality="standard",
+            timeout=900,
+            text=True,
+        )
         return res.returncode, str(res.stderr)
 
     returncode, stderr_output = await asyncio.to_thread(_run_ffmpeg)

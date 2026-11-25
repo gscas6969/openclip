@@ -68,6 +68,7 @@ $backend = Start-Process -FilePath $venvPython `
 Start-Sleep -Seconds 2
 
 Write-Host "Starting frontend server..."
+$env:BROWSERSLIST_IGNORE_OLD_DATA = '1'
 $frontend = Start-Process -FilePath 'npm.cmd' `
     -ArgumentList 'run', 'dev' `
     -WorkingDirectory (Join-Path $PSScriptRoot 'frontend') `

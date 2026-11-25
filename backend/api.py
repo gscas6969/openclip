@@ -131,6 +131,9 @@ async def on_startup() -> None:
     n = await database.mark_interrupted_projects(INTERRUPTED_MESSAGE)
     if n:
         logger.warning("Marked %d interrupted project(s) as failed", n)
+    saved_encoder = await settings_mod.get_setting("video_encoder")
+    ffbin.set_preferred_encoder(saved_encoder or "auto")
+    asyncio.create_task(asyncio.to_thread(ffbin.detect_video_encoders))
     logger.info("Database initialised, tmp dir ready at %s", TMP_DIR)
 
 
@@ -315,6 +318,7 @@ class UpdateSettingsRequest(BaseModel):
     llm_model: Optional[str] = None
     whisper_model: Optional[str] = None
     caption_style: Optional[str] = None
+    video_encoder: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1570,6 +1574,13 @@ async def install_progress():
     return system_setup.get_job()
 
 
+@app.get("/api/system/encoders")
+async def get_video_encoders(refresh: bool = False):
+    saved_encoder = await settings_mod.get_setting("video_encoder")
+    ffbin.set_preferred_encoder(saved_encoder or "auto")
+    return await asyncio.to_thread(ffbin.get_encoder_status, refresh)
+
+
 @app.get("/api/settings")
 async def get_settings():
     return await settings_mod.get_all_settings()
@@ -1583,9 +1594,12 @@ async def update_settings(body: UpdateSettingsRequest):
         "llm_model": body.llm_model,
         "whisper_model": body.whisper_model,
         "caption_style": body.caption_style,
+        "video_encoder": body.video_encoder,
     }
     for key, value in pairs.items():
         if value is not None:
+            if key == "video_encoder":
+                value = ffbin.set_preferred_encoder(value)
             await settings_mod.set_setting(key, value)
     return {"success": True}
 

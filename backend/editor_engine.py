@@ -227,22 +227,34 @@ async def render_clip_from_edit_state(
     tmp_out = output_path + ".rendering.mp4"
 
     if filter_parts:
-        cmd.extend([
+        prefix_cmd = [
+            *cmd,
             "-filter_complex", ";".join(filter_parts),
             "-map", v_cur,
             "-map", a_out,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        ]
+        suffix_cmd = [
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             tmp_out,
-        ])
+        ]
+
+        def _exec() -> tuple[int, str]:
+            res = ffbin.run_ffmpeg_encode(
+                prefix_cmd,
+                suffix_cmd,
+                quality="standard",
+                timeout=900,
+                text=True,
+            )
+            return res.returncode, str(res.stderr)
     else:
         # No edits at all -> clean fast copy
-        cmd.extend(["-c", "copy", "-movflags", "+faststart", tmp_out])
+        copy_cmd = [*cmd, "-c", "copy", "-movflags", "+faststart", tmp_out]
 
-    def _exec() -> tuple[int, str]:
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
-        return res.returncode, str(res.stderr)
+        def _exec() -> tuple[int, str]:
+            res = subprocess.run(copy_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+            return res.returncode, str(res.stderr)
 
     try:
         code, stderr = await asyncio.to_thread(_exec)

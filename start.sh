@@ -86,7 +86,7 @@ sleep 2
 # ==========================================
 echo "Starting frontend server..."
 cd frontend
-npm run dev &
+BROWSERSLIST_IGNORE_OLD_DATA=1 npm run dev &
 FRONTEND_PID=$!
 
 cd ..

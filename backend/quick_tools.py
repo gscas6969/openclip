@@ -72,6 +72,27 @@ async def _run_ffmpeg(cmd: list[str], timeout: int = 600) -> None:
         raise RuntimeError(f"FFmpeg tool failed: {stderr[-1000:]}")
 
 
+async def _run_ffmpeg_encode(
+    prefix_cmd: list[str],
+    suffix_cmd: list[str],
+    *,
+    quality: str = "standard",
+    crf: Optional[int] = None,
+    timeout: int = 600,
+) -> None:
+    res = await asyncio.to_thread(
+        ffbin.run_ffmpeg_encode,
+        prefix_cmd,
+        suffix_cmd,
+        quality=quality,
+        crf=crf,
+        timeout=timeout,
+        text=True,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f"FFmpeg tool failed: {str(res.stderr)[-1000:]}")
+
+
 async def run_trim(
     input_path: str,
     output_dir: str,
@@ -91,16 +112,18 @@ async def run_trim(
     out_path = os.path.join(output_dir, out_name)
 
     if accurate:
-        cmd = [
+        prefix_cmd = [
             ffbin.ffmpeg(), "-y",
             "-ss", f"{st:.3f}",
             "-i", input_path,
             "-t", f"{en - st:.3f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        ]
+        suffix_cmd = [
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             out_path,
         ]
+        await _run_ffmpeg_encode(prefix_cmd, suffix_cmd, quality="standard")
     else:
         cmd = [
             ffbin.ffmpeg(), "-y",
@@ -111,8 +134,8 @@ async def run_trim(
             "-movflags", "+faststart",
             out_path,
         ]
+        await _run_ffmpeg(cmd)
 
-    await _run_ffmpeg(cmd)
     out_meta = await asyncio.to_thread(probe_media, out_path)
     return {"filename": out_name, "output_path": out_path, "input": in_meta, "output": out_meta}
 
@@ -145,17 +168,16 @@ async def run_compress(
     out_name = f"compressed_{uuid.uuid4().hex[:10]}.mp4"
     out_path = os.path.join(output_dir, out_name)
 
-    cmd = [ffbin.ffmpeg(), "-y", "-i", input_path]
+    prefix_cmd = [ffbin.ffmpeg(), "-y", "-i", input_path]
     if vf_parts:
-        cmd.extend(["-vf", ",".join(vf_parts)])
-    cmd.extend([
-        "-c:v", "libx264", "-preset", "fast", "-crf", str(final_crf),
+        prefix_cmd.extend(["-vf", ",".join(vf_parts)])
+    suffix_cmd = [
         "-c:a", "aac", "-b:a", audio_br,
         "-movflags", "+faststart",
         out_path,
-    ])
+    ]
 
-    await _run_ffmpeg(cmd)
+    await _run_ffmpeg_encode(prefix_cmd, suffix_cmd, quality="compress", crf=final_crf)
     out_meta = await asyncio.to_thread(probe_media, out_path)
     savings = 0.0
     if in_meta["size_bytes"] > 0:
@@ -185,33 +207,32 @@ async def run_convert(
     out_name = f"converted_{uuid.uuid4().hex[:10]}.{fmt}"
     out_path = os.path.join(output_dir, out_name)
 
-    if fmt == "mp3":
-        cmd = [ffbin.ffmpeg(), "-y", "-i", input_path, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", out_path]
-    elif fmt == "wav":
-        cmd = [ffbin.ffmpeg(), "-y", "-i", input_path, "-vn", "-c:a", "pcm_s16le", out_path]
-    elif fmt == "gif":
-        cmd = [
-            ffbin.ffmpeg(), "-y", "-i", input_path,
-            "-vf", "fps=12,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
-            "-loop", "0",
-            out_path,
-        ]
-    elif fmt == "webm":
-        cmd = [
-            ffbin.ffmpeg(), "-y", "-i", input_path,
-            "-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0",
-            "-c:a", "libopus",
-            out_path,
-        ]
+    if fmt in {"mp3", "wav", "gif", "webm"}:
+        if fmt == "mp3":
+            cmd = [ffbin.ffmpeg(), "-y", "-i", input_path, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", out_path]
+        elif fmt == "wav":
+            cmd = [ffbin.ffmpeg(), "-y", "-i", input_path, "-vn", "-c:a", "pcm_s16le", out_path]
+        elif fmt == "gif":
+            cmd = [
+                ffbin.ffmpeg(), "-y", "-i", input_path,
+                "-vf", "fps=12,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+                "-loop", "0",
+                out_path,
+            ]
+        else:
+            cmd = [
+                ffbin.ffmpeg(), "-y", "-i", input_path,
+                "-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0",
+                "-c:a", "libopus",
+                out_path,
+            ]
+        await _run_ffmpeg(cmd)
     else:
-        cmd = [
-            ffbin.ffmpeg(), "-y", "-i", input_path,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "192k",
-            out_path,
-        ]
-
-    await _run_ffmpeg(cmd)
+        await _run_ffmpeg_encode(
+            [ffbin.ffmpeg(), "-y", "-i", input_path],
+            ["-c:a", "aac", "-b:a", "192k", out_path],
+            quality="standard",
+        )
     out_meta = await asyncio.to_thread(probe_media, out_path)
     return {"filename": out_name, "output_path": out_path, "format": fmt, "input": in_meta, "output": out_meta}
 
@@ -254,16 +275,17 @@ async def run_transform(
     out_name = f"transformed_{uuid.uuid4().hex[:10]}.mp4"
     out_path = os.path.join(output_dir, out_name)
 
-    cmd = [
+    prefix_cmd = [
         ffbin.ffmpeg(), "-y",
         "-i", input_path,
         "-vf", ",".join(vf),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    ]
+    suffix_cmd = [
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         out_path,
     ]
 
-    await _run_ffmpeg(cmd)
+    await _run_ffmpeg_encode(prefix_cmd, suffix_cmd, quality="standard")
     out_meta = await asyncio.to_thread(probe_media, out_path)
     return {"filename": out_name, "output_path": out_path, "input": in_meta, "output": out_meta}

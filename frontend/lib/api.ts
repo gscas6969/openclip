@@ -284,6 +284,7 @@ export async function getSettings(): Promise<Settings> {
                 llm_model: 'gpt-4o',
                 whisper_model: 'base',
                 caption_style: 'mozi_pop',
+                video_encoder: 'auto',
                 has_api_key: false,
             };
         }
@@ -294,8 +295,20 @@ export async function getSettings(): Promise<Settings> {
             llm_model: 'gpt-4o',
             whisper_model: 'base',
             caption_style: 'mozi_pop',
+            video_encoder: 'auto',
             has_api_key: false,
         };
+    }
+}
+
+export async function getEncoderStatus(refresh = false): Promise<import('./types').EncoderStatus | null> {
+    try {
+        const qs = refresh ? '?refresh=true' : '';
+        const res = await fetch(`${getBaseUrl()}/api/system/encoders${qs}`, { cache: 'no-store' });
+        if (!res.ok) return null;
+        return res.json();
+    } catch {
+        return null;
     }
 }
 

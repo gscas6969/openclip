@@ -129,6 +129,8 @@ async def get_setting(key: str) -> Optional[str]:
                 return "mozi_pop"
             if key == "llm_provider":
                 return "codex"
+            if key == "video_encoder":
+                return "auto"
             return None
         value = row[0] # type: ignore
         if key in _ENCRYPTED_KEYS and value:
@@ -195,6 +197,7 @@ async def get_all_settings() -> Dict[str, Any]:
         result.setdefault("llm_model", _DEFAULT_MODELS.get(result["llm_provider"], ""))
         result.setdefault("whisper_model", "base")
         result.setdefault("caption_style", "mozi_pop")
+        result.setdefault("video_encoder", "auto")
         result.setdefault("has_api_key", False)
 
     except Exception as exc:
