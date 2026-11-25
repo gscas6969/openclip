@@ -43,6 +43,25 @@ const LAYOUT_PRESETS = [
     { value: "original", label: "Original + Blur Fill" },
 ] as const;
 
+const FOCUS_PRESETS = [
+    {
+        label: "😂 Funny & Chaotic",
+        prompt: "Find the funniest moments, unexpected jokes, hilarious banter, chaotic reactions, and laugh-out-loud stories.",
+    },
+    {
+        label: "🎮 Stream Highlights",
+        prompt: "Find the most entertaining livestream highlights, big reactions, chat-worthy moments, and memorable stories.",
+    },
+    {
+        label: "🔥 Hot Takes",
+        prompt: "Find the boldest opinions, controversial hot takes, heated debates, and mic-drop moments.",
+    },
+    {
+        label: "💡 Actionable Tips",
+        prompt: "Find the clearest actionable advice, surprising insights, and high-value takeaways.",
+    },
+] as const;
+
 function formatDuration(s: number) {
     const m = Math.floor(s / 60);
     const sec = Math.round(s % 60);
@@ -288,7 +307,7 @@ export default function CreateProjectPage() {
                                     value={url}
                                     onChange={(e) => setUrl(e.target.value)}
                                     className="flex-1 bg-transparent text-sm text-white placeholder-slate-500 focus:outline-none"
-                                    placeholder="https://youtube.com/watch?v=... or https://youtu.be/..."
+                                    placeholder="https://youtube.com/watch?v=..., /live/..., or https://youtu.be/..."
                                     type="text"
                                     required
                                 />
@@ -442,6 +461,25 @@ export default function CreateProjectPage() {
                                 placeholder="e.g. Find controversial hot takes, actionable tips, or funniest moments..."
                                 className="w-full rounded-xl bg-slate-900/50 border border-slate-800 px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-primary focus:outline-none"
                             />
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {FOCUS_PRESETS.map((preset) => {
+                                    const active = customPrompt.trim() === preset.prompt;
+                                    return (
+                                        <button
+                                            key={preset.label}
+                                            type="button"
+                                            onClick={() => setCustomPrompt(active ? "" : preset.prompt)}
+                                            className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold border transition-all ${
+                                                active
+                                                    ? "border-primary bg-primary/20 text-white"
+                                                    : "border-white/10 bg-slate-900/40 text-slate-400 hover:text-white hover:border-white/25"
+                                            }`}
+                                        >
+                                            {preset.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
                         </div>
                     </div>
 

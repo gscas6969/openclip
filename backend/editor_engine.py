@@ -186,9 +186,16 @@ async def render_clip_from_edit_state(
                 f"[0:a]atrim=start={st:.3f}:end={en:.3f},asetpts=PTS-STARTPTS[a{idx}]"
             )
             seg_labels.append(f"[v{idx}][a{idx}]")
-        filter_parts.append(
-            f"{''.join(seg_labels)}concat=n={len(kept)}:v=1:a=1[vbase][aout]"
-        )
+        if new_duration > 0.6:
+            fade_out_st = max(0.0, new_duration - 0.06)
+            filter_parts.append(
+                f"{''.join(seg_labels)}concat=n={len(kept)}:v=1:a=1[vbase][araw];"
+                f"[araw]afade=t=out:st={fade_out_st:.3f}:d=0.06[aout]"
+            )
+        else:
+            filter_parts.append(
+                f"{''.join(seg_labels)}concat=n={len(kept)}:v=1:a=1[vbase][aout]"
+            )
         v_cur = "[vbase]"
         a_out = "[aout]"
     else:

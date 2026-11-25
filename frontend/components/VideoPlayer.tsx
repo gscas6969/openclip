@@ -17,7 +17,12 @@ function extractVideoId(url: string): string | null {
         }
         // youtu.be/ID
         if (parsed.hostname === "youtu.be") {
-            return parsed.pathname.slice(1);
+            return parsed.pathname.slice(1).split("/")[0];
+        }
+        // youtube.com/live/ID or /shorts/ID or /embed/ID
+        const pathMatch = parsed.pathname.match(/^\/(?:live|shorts|embed)\/([^/?#]+)/);
+        if (pathMatch) {
+            return pathMatch[1];
         }
     } catch {
         // ignore malformed URLs

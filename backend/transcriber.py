@@ -50,6 +50,8 @@ def _extract_video_id(youtube_url: str) -> str:
             return parse_qs(parsed.query).get("v", [""])[0]
         if parsed.path.startswith("/shorts/"):
             return parsed.path.split("/shorts/")[-1].split("/")[0]
+        if parsed.path.startswith("/live/"):
+            return parsed.path.split("/live/")[-1].split("/")[0]
         if parsed.path.startswith("/embed/"):
             return parsed.path.split("/embed/")[-1].split("/")[0]
 
@@ -333,74 +335,192 @@ async def _get_auto_captions(youtube_url: str) -> list[dict]:
 # JSON3 parser
 # ---------------------------------------------------------------------------
 
+def _estimate_word_duration(word: str) -> float:
+    """Estimate natural spoken duration for a single word when exact end time is missing."""
+    clean_len = len(word.strip(".,!?;:\"'()[]"))
+    return max(0.22, min(0.85, 0.14 + clean_len * 0.065))
+
+
+def _group_words_into_segments(
+    words: list[dict],
+    max_segment_seconds: float = 6.0,
+    max_segment_words: int = 18,
+    pause_break_seconds: float = 0.45,
+) -> list[dict]:
+    """
+    Group a chronological word list into short, sentence- and pause-aligned
+    transcript segments so downstream LLM prompting gets frequent, accurate
+    timestamps instead of giant multi-minute merged walls of text.
+    """
+    if not words:
+        return []
+
+    segments: list[dict] = []
+    cur: list[dict] = []
+
+    def _flush() -> None:
+        nonlocal cur
+        if not cur:
+            return
+        segments.append({
+            "start": round(float(cur[0]["start"]), 3),
+            "end": round(float(cur[-1]["end"]), 3),
+            "text": " ".join(w["word"] for w in cur),
+            "words": cur,
+        })
+        cur = []
+
+    for w in words:
+        if cur:
+            gap = float(w["start"]) - float(cur[-1]["end"])
+            span = float(w["end"]) - float(cur[0]["start"])
+            if (
+                gap >= pause_break_seconds
+                or span > max_segment_seconds
+                or len(cur) >= max_segment_words
+            ):
+                _flush()
+
+        cur.append(w)
+
+        # Break immediately after sentence-ending punctuation (avoiding short abbreviations)
+        tok = w["word"]
+        if len(cur) >= 3 and tok.rstrip("\"'”’)]").endswith((".", "!", "?")):
+            bare = tok.strip("\"'”’()[]").lower()
+            if bare not in {"mr.", "mrs.", "ms.", "dr.", "st.", "vs.", "etc.", "e.g.", "i.e.", "u.s.", "u.k."}:
+                _flush()
+
+    _flush()
+    return segments
+
+
 def _parse_json3(json_path: str) -> list[dict]:
     """
-    Parse a YouTube JSON3 subtitle file into transcript segments with word timings.
+    Parse a YouTube JSON3 subtitle file into clean, de-overlapped transcript
+    segments with accurate word timings and preserved speech pauses.
     """
-    segments: list[dict] = []
-
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    events = data.get("events", [])
-    
-    for event in events:
-        if "segs" not in event:
-            continue
-            
-        t_start_ms = event.get("tStartMs", 0)
-        d_duration_ms = event.get("dDurationMs", 0)
-        
-        # Build segment text and word array
-        seg_text = ""
-        words = []
-        
-        segs = event["segs"]
-        for i, s in enumerate(segs):
-            raw_word = str(s.get("utf8", ""))
-            if not raw_word.strip() or raw_word == "\n":
-                continue
-                
-            offset_ms = float(s.get("tOffsetMs", 0))
-            word_start = (t_start_ms + offset_ms) / 1000.0
-            
-            # Estimate word end: If next word exists, use its start. Else, use event end.
-            if i + 1 < len(segs) and "tOffsetMs" in segs[i+1]:
-                word_end = (float(t_start_ms) + float(segs[i+1]["tOffsetMs"])) / 1000.0
-            else:
-                # Provide a minimum padding if duration is missing
-                fallback_dur = max(float(d_duration_ms), offset_ms + 300.0)
-                word_end = (float(t_start_ms) + fallback_dur) / 1000.0
-                
-            words.append({
-                "word": str(raw_word).strip(),
-                "start": word_start,
-                "end": word_end
-            })
-            seg_text += raw_word
-            
-        seg_text = str(seg_text).strip()
-        if not seg_text or not words:
-            continue
-            
-        start_sec = words[0]["start"]
-        end_sec = words[-1]["end"]
-        
-        # Merge if very close to previous segment
-        if segments and start_sec - segments[-1]["end"] < 0.5:
-            last_seg = segments[-1]
-            last_seg["end"] = max(last_seg["end"], end_sec)
-            last_seg["text"] += " " + seg_text
-            last_seg["words"].extend(words) # type: ignore
-        else:
-            segments.append({
-                "start": start_sec,
-                "end": end_sec,
-                "text": seg_text,
-                "words": words
-            })
+    raw_events = [
+        ev for ev in data.get("events", [])
+        if isinstance(ev, dict) and ev.get("segs")
+    ]
+    raw_events.sort(key=lambda ev: float(ev.get("tStartMs", 0)))
 
-    logger.info("Parsed %d segments from JSON3 file", len(segments))
+    all_words: list[dict] = []
+
+    for ev_idx, event in enumerate(raw_events):
+        t_start_ms = float(event.get("tStartMs", 0))
+        d_duration_ms = float(event.get("dDurationMs", 0))
+
+        # Look ahead to next non-empty event start so rolling display holds
+        # (typically 4-6s on YouTube auto-captions) don't smear across pauses.
+        next_ev_start_s: Optional[float] = None
+        for nxt in raw_events[ev_idx + 1:]:
+            nxt_segs = nxt.get("segs") or []
+            if any(str(s.get("utf8", "")).strip() for s in nxt_segs):
+                cand = float(nxt.get("tStartMs", 0)) / 1000.0
+                if cand > t_start_ms / 1000.0 + 0.02:
+                    next_ev_start_s = cand
+                    break
+
+        # Filter out pure-whitespace / newline tokens before lookahead
+        valid_segs: list[tuple[str, float, bool]] = []
+        for s in event["segs"]:
+            raw_text = str(s.get("utf8", "")).replace("\n", " ").strip()
+            if not raw_text:
+                continue
+            has_offset = "tOffsetMs" in s and s["tOffsetMs"] is not None
+            offset_ms = float(s.get("tOffsetMs", 0)) if has_offset else 0.0
+            valid_segs.append((raw_text, offset_ms, has_offset))
+
+        if not valid_segs:
+            continue
+
+        has_word_offsets = any(has_off for _, _, has_off in valid_segs) and len(valid_segs) > 1
+
+        if has_word_offsets:
+            for i, (tok_text, offset_ms, _) in enumerate(valid_segs):
+                word_start = (t_start_ms + offset_ms) / 1000.0
+                tokens = tok_text.split()
+                if not tokens:
+                    continue
+
+                if i + 1 < len(valid_segs):
+                    next_word_start = (t_start_ms + valid_segs[i + 1][1]) / 1000.0
+                    # Cap gap inside a single word so an internal pause stays visible
+                    est_span = sum(_estimate_word_duration(t) for t in tokens)
+                    word_end = min(next_word_start, word_start + max(est_span * 1.4, 0.9))
+                else:
+                    est_span = sum(_estimate_word_duration(t) for t in tokens)
+                    # Do NOT stretch to YouTube's rolling display dDurationMs
+                    max_allowed = word_start + est_span
+                    if d_duration_ms > offset_ms + 80:
+                        ev_end = (t_start_ms + d_duration_ms) / 1000.0
+                        max_allowed = min(max_allowed, ev_end)
+                    if next_ev_start_s is not None and next_ev_start_s > word_start + 0.05:
+                        max_allowed = min(max_allowed, next_ev_start_s)
+                    word_end = max_allowed
+
+                word_end = max(word_start + 0.06, word_end)
+                if len(tokens) == 1:
+                    all_words.append({
+                        "word": tokens[0],
+                        "start": round(word_start, 3),
+                        "end": round(word_end, 3),
+                    })
+                else:
+                    weights = [max(1, len(t)) + 1 for t in tokens]
+                    tot_w = sum(weights)
+                    cursor = word_start
+                    span = word_end - word_start
+                    for tok, wt in zip(tokens, weights):
+                        dur = span * (wt / tot_w)
+                        all_words.append({
+                            "word": tok,
+                            "start": round(cursor, 3),
+                            "end": round(max(cursor + 0.05, cursor + dur), 3),
+                        })
+                        cursor += dur
+        else:
+            # Manual/block caption event without per-word offsets
+            joined = " ".join(txt for txt, _, _ in valid_segs)
+            tokens = joined.split()
+            if not tokens:
+                continue
+            ev_start_s = t_start_ms / 1000.0
+            est_total = sum(_estimate_word_duration(t) for t in tokens)
+            if d_duration_ms > 100:
+                ev_end_s = min(ev_start_s + d_duration_ms / 1000.0, ev_start_s + max(est_total * 1.6, 1.0))
+            else:
+                ev_end_s = ev_start_s + est_total
+            if next_ev_start_s is not None and next_ev_start_s > ev_start_s + 0.08:
+                ev_end_s = min(ev_end_s, next_ev_start_s)
+            ev_end_s = max(ev_start_s + 0.15, ev_end_s)
+
+            weights = [max(1, len(t)) + 1 for t in tokens]
+            tot_w = sum(weights)
+            cursor = ev_start_s
+            span = ev_end_s - ev_start_s
+            for tok, wt in zip(tokens, weights):
+                dur = span * (wt / tot_w)
+                all_words.append({
+                    "word": tok,
+                    "start": round(cursor, 3),
+                    "end": round(max(cursor + 0.05, cursor + dur), 3),
+                })
+                cursor += dur
+
+    # Strictly chronological, non-overlapping words
+    all_words.sort(key=lambda w: (w["start"], w["end"]))
+    for i in range(len(all_words) - 1):
+        nxt_start = all_words[i + 1]["start"]
+        if all_words[i]["end"] > nxt_start and nxt_start > all_words[i]["start"] + 0.04:
+            all_words[i]["end"] = round(nxt_start, 3)
+
+    segments = _group_words_into_segments(all_words)
+    logger.info("Parsed %d segments (%d words) from JSON3 file", len(segments), len(all_words))
     return segments
 
 

@@ -47,6 +47,7 @@ import database  # type: ignore
 import downloader  # type: ignore
 import clipper  # type: ignore
 import transcriber  # type: ignore
+import highlight_signals  # type: ignore
 import llm  # type: ignore
 import reframer  # type: ignore
 import captioner  # type: ignore
@@ -330,6 +331,7 @@ async def _run_pipeline(project_id: str, youtube_url: str) -> None:
     os.makedirs(clips_dir, exist_ok=True)
     video_ckpt = os.path.join(project_dir, "video.json")
     transcript_ckpt = os.path.join(project_dir, "transcript.json")
+    signals_ckpt = os.path.join(project_dir, "signals.json")
     suggestions_ckpt = os.path.join(project_dir, "suggestions.json")
 
     async def fail(message: str) -> None:
@@ -423,12 +425,38 @@ async def _run_pipeline(project_id: str, youtube_url: str) -> None:
             _write_json(transcript_ckpt, transcript_segments)
             await _broadcast(project_id, "transcribing", 50, "Transcript ready")
 
-        # ---- STEP 3: LLM Clip Suggestions ----
+        # ---- STEP 3: Highlight Signals + LLM Clip Suggestions ----
         suggestions = _read_json(suggestions_ckpt)
         if suggestions:
             await _broadcast(project_id, "analyzing", 75, f"Using the {len(suggestions)} clip moments found earlier")
         else:
             await database.update_project_status(project_id, "analyzing")
+
+            signals = _read_json(signals_ckpt)
+            if signals is None:
+                def signal_progress(percent: float, msg: str):
+                    asyncio.run_coroutine_threadsafe(
+                        _broadcast(project_id, "analyzing", percent, msg),
+                        loop,
+                    )
+
+                try:
+                    signals = await highlight_signals.extract_highlight_signals(
+                        youtube_url, file_path, video_duration, progress_callback=signal_progress,
+                    )
+                    _write_json(signals_ckpt, signals)
+                    hotspots_n = len(signals.get("hotspots") or [])
+                    chat_n = len(signals.get("chat_spikes") or [])
+                    if hotspots_n:
+                        extra = f" (including {chat_n} live chat spikes)" if chat_n else ""
+                        await _broadcast(
+                            project_id, "analyzing", 54,
+                            f"Found {hotspots_n} audience/audio highlight signals{extra}",
+                        )
+                except Exception as sig_exc:
+                    logger.warning("Highlight signal extraction skipped for %s: %s", project_id, sig_exc)
+                    signals = {}
+
             await _broadcast(project_id, "analyzing", 55, "AI analyzing video…")
 
             def analyze_progress(stage: str, percent: float, msg: str):
@@ -448,6 +476,8 @@ async def _run_pipeline(project_id: str, youtube_url: str) -> None:
                     min_duration=int(project.get("clip_min_duration") or 30),
                     max_duration=int(project.get("clip_max_duration") or 60),
                     custom_prompt=project.get("custom_prompt"),
+                    video_path=file_path,
+                    highlight_signals=signals,
                 )
             except Exception as e:
                 logger.exception("LLM step failed for %s", project_id)

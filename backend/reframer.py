@@ -917,19 +917,35 @@ async def _cut_raw_clip(video_path: str, start: float, end: float, output_path: 
     """
     Frame-accurate cut starting at exact ``start`` seconds.
     Avoids `-c copy` keyframe snapping which shifts audio/video ahead of
-    word-level caption timestamps by 0.2s-1.5s.
+    word-level caption timestamps by 0.2s-1.5s, and applies a subtle micro
+    audio fade-in/out to eliminate harsh cut clicks at clip boundaries.
     """
     duration = max(0.5, end - start)
-    cmd = [
+    base_cmd = [
         ffbin.ffmpeg(), "-y",
         "-ss", f"{start:.3f}",
         "-i", video_path,
         "-t", f"{duration:.3f}",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+    ]
+    tail_cmd = [
         "-c:a", "aac", "-b:a", "192k",
         "-avoid_negative_ts", "make_zero",
         output_path,
     ]
+
+    if duration > 1.0:
+        fade_out_d = 0.08
+        fade_out_st = max(0.0, duration - fade_out_d)
+        af = f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.025,afade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}"
+        cmd = base_cmd + ["-af", af] + tail_cmd
+        result = await asyncio.to_thread(_run, cmd, 300, True)
+        if result.returncode == 0:
+            return
+        # Fallback without audio filter (e.g. silent video with no audio stream)
+        logger.debug("Raw clip cut with audio fade failed, retrying without -af: %s", result.stderr[-250:])
+
+    cmd = base_cmd + tail_cmd
     result = await asyncio.to_thread(_run, cmd, 300, True)
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed cutting raw clip: {result.stderr[-500:]}")

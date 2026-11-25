@@ -16,6 +16,9 @@ from typing import Optional, Callable
 import httpx  # type: ignore
 from tenacity import retry, stop_after_attempt, retry_if_exception
 
+import clip_boundaries  # type: ignore
+import highlight_signals as hs  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 120.0
@@ -35,6 +38,8 @@ async def get_clip_suggestions(
     min_duration: int = 30,
     max_duration: int = 60,
     custom_prompt: Optional[str] = None,
+    video_path: Optional[str] = None,
+    highlight_signals: Optional[dict] = None,
 ) -> list[dict]:
     """
     Map-Reduce approach to stay under TPM limits.
@@ -59,10 +64,19 @@ async def get_clip_suggestions(
 
     caller = _ModelCaller(provider, api_key, model, progress)
 
-    # Step 1 — Split into chunks of max 8 minutes each (larger chunks = fewer API calls)
-    chunks = _chunk_transcript(transcript, chunk_minutes=8)
+    # Normalize overly long merged segments so every LLM chunk has fine-grained timestamps
+    prepared_transcript = clip_boundaries.prepare_segments_for_llm(transcript)
 
-    logger.info(f"Split transcript into {len(chunks)} chunks for processing")
+    # Step 1 — Split into overlapping chunks (12 min chunks for long VODs > 45 min)
+    # with overlap >= max_duration so stories near chunk edges finish cleanly.
+    chunk_minutes = 12 if video_duration > 45 * 60 else 8
+    chunks = _chunk_transcript(
+        prepared_transcript,
+        chunk_minutes=chunk_minutes,
+        overlap=max(45, max_duration),
+    )
+
+    logger.info(f"Split transcript into {len(chunks)} chunks ({chunk_minutes}m each) for processing")
 
     # Step 2 — Get candidates from each chunk (MAP).
     # A chunk that still fails after retries is skipped rather than failing
@@ -81,6 +95,7 @@ async def get_clip_suggestions(
                 min_duration=min_duration,
                 max_duration=max_duration,
                 custom_prompt=custom_prompt,
+                highlight_signals=highlight_signals,
             )
             all_candidates.extend(candidates)
         except Exception as exc:
@@ -95,25 +110,51 @@ async def get_clip_suggestions(
 
         # Add delay between chunks to avoid rate limits (skip delay on last chunk)
         if i < len(chunks) - 1:
-            await asyncio.sleep(4.0 + random.uniform(0, 2.0))
+            base_delay = 2.5 if len(chunks) > 10 else 4.0
+            await asyncio.sleep(base_delay + random.uniform(0, 1.5))
 
     if failures and len(failures) == len(chunks):
         raise failures[-1]
 
     # Step 3 — If only 1 chunk, candidates are already final
     if len(chunks) == 1 or not all_candidates:
-        return _validate_suggestions(all_candidates, video_duration, min_duration, max_duration)
+        final_clips = _validate_suggestions(
+            all_candidates, video_duration, min_duration, max_duration,
+            transcript=prepared_transcript,
+        )
+        return await clip_boundaries.refine_suggestions_with_audio(
+            final_clips, video_path, video_duration,
+            max_duration=max_duration, min_duration=min_duration,
+        )
+
+    # Pre-snap candidate boundaries before ranking so Reduce sees exact sentence-aligned spans
+    snapped_candidates = _validate_suggestions(
+        all_candidates, video_duration, min_duration, max_duration,
+        transcript=prepared_transcript,
+        dedupe_overlaps=False,
+    ) or all_candidates
+
+    # Enrich candidates with overlapping audience/audio highlight signals for Reduce ranking
+    snapped_candidates = hs.enrich_candidates_with_signals(snapped_candidates, highlight_signals)
+
+    # On multi-hour VODs, cap Reduce input to top 40 candidates (by viral_score + signal boost)
+    if len(snapped_candidates) > 40:
+        snapped_candidates.sort(
+            key=lambda c: float(c.get("viral_score", 0)) + float(c.get("signal_boost", 0.0)),
+            reverse=True,
+        )
+        snapped_candidates = sorted(snapped_candidates[:40], key=lambda c: float(c["start"]))
 
     # Step 4 — Rank all candidates (REDUCE). If ranking fails or returns
     # nothing usable, rank locally by viral score instead of failing.
-    await asyncio.sleep(random.uniform(3.0, 5.0))
+    await asyncio.sleep(random.uniform(2.5, 4.0))
 
     progress("analyzing", 72, "Ranking best moments...")
     final_clips: list[dict] = []
     try:
         final_clips = _validate_suggestions(
             await _rank_candidates(
-                all_candidates, caller,
+                snapped_candidates, caller,
                 min_duration=min_duration,
                 max_duration=max_duration,
                 custom_prompt=custom_prompt,
@@ -121,22 +162,38 @@ async def get_clip_suggestions(
             video_duration,
             min_duration,
             max_duration,
+            transcript=prepared_transcript,
         )
     except Exception as exc:
         logger.warning(f"Ranking step failed, ranking locally instead: {exc}")
         progress("analyzing", 73, f"Warning: AI ranking failed ({friendly_error(exc)}), picking the top-scored moments instead")
 
     if not final_clips:
-        final_clips = _validate_suggestions(_rank_locally(all_candidates), video_duration, min_duration, max_duration)
+        final_clips = _validate_suggestions(
+            _rank_locally(snapped_candidates),
+            video_duration,
+            min_duration,
+            max_duration,
+            transcript=prepared_transcript,
+        )
+
+    final_clips = await clip_boundaries.refine_suggestions_with_audio(
+        final_clips, video_path, video_duration,
+        max_duration=max_duration, min_duration=min_duration,
+    )
 
     progress("analyzing", 75, f"Found {len(final_clips)} clips")
     return final_clips
 
 
 def _rank_locally(candidates: list[dict], limit: int = 10) -> list[dict]:
-    """Fallback ranking: highest viral score first, no overlaps, at most ``limit``."""
+    """Fallback ranking: highest viral + signal score first, no overlaps, at most ``limit``."""
     picked: list[dict] = []
-    for c in sorted(candidates, key=lambda c: c.get("viral_score", 0), reverse=True):
+    for c in sorted(
+        candidates,
+        key=lambda c: float(c.get("viral_score", 0)) + float(c.get("signal_boost", 0.0)),
+        reverse=True,
+    ):
         if all(c["end"] <= p["start"] or c["start"] >= p["end"] for p in picked):
             picked.append(c)
         if len(picked) >= limit:
@@ -146,26 +203,31 @@ def _rank_locally(candidates: list[dict], limit: int = 10) -> list[dict]:
 
 def _chunk_transcript(
     transcript: list[dict],
-    chunk_minutes: int = 3
+    chunk_minutes: int = 8,
+    overlap: int = 60,
 ) -> list[list[dict]]:
     """
-    Split transcript segments into chunks of N minutes.
+    Split transcript segments into overlapping chunks of N minutes.
     """
+    if not transcript:
+        return []
     chunk_seconds = chunk_minutes * 60
-    overlap = 15  # seconds
     chunks = []
     start = 0.0
-    
-    while start < transcript[-1]["end"]:
+    last_end = max(float(seg["end"]) for seg in transcript)
+
+    while start < last_end:
         end = start + chunk_seconds + overlap
         chunk = [
             seg for seg in transcript
-            if seg["start"] >= start and seg["start"] < end
+            if float(seg["end"]) > start and float(seg["start"]) < end
         ]
         if chunk:
             chunks.append(chunk)
+        if end >= last_end:
+            break
         start += chunk_seconds  # next chunk starts without overlap
-        
+
     return chunks
 
 
@@ -177,11 +239,16 @@ async def _analyze_chunk(
     min_duration: int = 30,
     max_duration: int = 60,
     custom_prompt: Optional[str] = None,
+    highlight_signals: Optional[dict] = None,
 ) -> list[dict]:
     """
-    Send ONE chunk to LLM. Stay under 1500 tokens.
+    Send ONE chunk to LLM.
     """
-    prompt = _build_chunk_prompt(chunk, chunk_index, total_chunks, min_duration, max_duration, custom_prompt)
+    prompt = _build_chunk_prompt(
+        chunk, chunk_index, total_chunks,
+        min_duration, max_duration, custom_prompt,
+        highlight_signals=highlight_signals,
+    )
     raw = await caller.call(prompt)
     logger.info(f"LLM raw response for chunk {chunk_index+1}: {raw[:500]}")
     parsed = _parse_llm_json(raw)
@@ -205,34 +272,42 @@ async def _rank_candidates(
     return _parse_llm_json(raw)
 
 
-def _format_transcript(segments: list[dict]) -> str:
+def _format_transcript(
+    segments: list[dict],
+    chunk_hotspots: Optional[list[dict]] = None,
+) -> str:
     """
-    Format segments as readable timestamped text.
+    Format segments with exact decimal-second timestamps matching the JSON
+    float-seconds schema, optionally tagging lines inside highlight hotspots.
     """
     lines = []
+    hotspots = chunk_hotspots or []
     for seg in segments:
-        text = seg['text'].strip()
+        text = str(seg.get("text", "")).strip()
         if not text:
             continue
-        start_m = int(seg['start'] // 60)
-        start_s = int(seg['start'] % 60)
-        end_m = int(seg['end'] // 60)
-        end_s = int(seg['end'] % 60)
-        lines.append(f"[{start_m:02d}:{start_s:02d}-{end_m:02d}:{end_s:02d}] {text}")
+        st = float(seg["start"])
+        en = float(seg["end"])
+        tag = hs.line_signal_tag(st, en, hotspots) if hotspots else ""
+        lines.append(f"[{st:.1f}s-{en:.1f}s] {text}{tag}")
     return "\n".join(lines)
 
 
 def _format_candidates(candidates: list[dict]) -> str:
     """
-    Format candidates list as compact text for reduce step.
+    Format candidates list as compact text with exact decimal-second timestamps
+    and any matched audience/audio highlight signals.
     """
     lines = []
     for i, c in enumerate(candidates):
-        start_m = int(c['start'] // 60)
-        start_s = int(c['start'] % 60)
-        end_m = int(c['end'] // 60)
-        end_s = int(c['end'] % 60)
-        lines.append(f"{i+1}. [{start_m:02d}:{start_s:02d}-{end_m:02d}:{end_s:02d}] \"{c.get('title','')}\" score:{c.get('viral_score',0)} | {c.get('reason','')}")
+        st = float(c["start"])
+        en = float(c["end"])
+        dur = max(0.0, en - st)
+        sig = f" [SIGNALS: {c['signal_summary']}]" if c.get("signal_summary") else ""
+        lines.append(
+            f'{i+1}. [{st:.2f}s-{en:.2f}s] ({dur:.1f}s) "{c.get("title","")}" '
+            f'score:{c.get("viral_score",0)}{sig} | {c.get("reason","")}'
+        )
     return "\n".join(lines)
 
 
@@ -241,9 +316,12 @@ def _validate_suggestions(
     video_duration: float,
     min_duration: int = 30,
     max_duration: int = 60,
+    transcript: Optional[list[dict]] = None,
+    dedupe_overlaps: bool = True,
 ) -> list[dict]:
     """
-    Final validation pass on all suggestions using configured duration bounds.
+    Final validation pass on all suggestions using configured duration bounds
+    and transcript-aware sentence/pause boundary snapping.
     """
     logger.info(f"RAW LLM SUGGESTIONS RECEIVED FOR VALIDATION ({len(suggestions)} clips): {suggestions}")
 
@@ -251,10 +329,12 @@ def _validate_suggestions(
         logger.warning("No suggestions received from LLM at all")
         return []
 
+    units = clip_boundaries._build_word_units(transcript) if transcript else None
     strict_min = max(10, int(min_duration * 0.75))
     strict = _filter_suggestions(
         suggestions, video_duration,
         min_dur=strict_min, target_min=min_duration, target_max=max_duration,
+        transcript=transcript, units=units, dedupe_overlaps=dedupe_overlaps,
     )
 
     if strict:
@@ -265,6 +345,7 @@ def _validate_suggestions(
     lenient = _filter_suggestions(
         suggestions, video_duration,
         min_dur=10, target_min=min_duration, target_max=max(max_duration + 15, 90),
+        transcript=transcript, units=units, dedupe_overlaps=dedupe_overlaps,
     )
 
     if lenient:
@@ -281,10 +362,13 @@ def _filter_suggestions(
     min_dur: float,
     target_min: float,
     target_max: float,
+    transcript: Optional[list[dict]] = None,
+    units: Optional[list[dict]] = None,
+    dedupe_overlaps: bool = True,
 ) -> list[dict]:
     """
-    Filter and adjust clip suggestions within duration bounds.
-    Returns non-overlapping clips sorted by start time.
+    Filter and snap clip suggestions to natural speech boundaries within duration bounds.
+    Returns non-overlapping clips (when dedupe_overlaps=True) sorted by start time.
     """
     import copy
     valid = []
@@ -296,30 +380,54 @@ def _filter_suggestions(
             s["start"], s["end"] = s["end"], s["start"]
 
         # Clamp to valid bounds
-        s["start"] = max(0, s["start"])
-        s["end"] = min(s["end"], video_duration)
+        s["start"] = max(0.0, float(s["start"]))
+        s["end"] = min(float(s["end"]), float(video_duration))
 
         if s["start"] >= s["end"]:
             continue
 
-        dur = s["end"] - s["start"]
-
-        if dur < min_dur:
-            logger.warning(f"Dropping clip - too short ({dur:.1f}s < {min_dur}s): {s.get('title')}")
+        raw_dur = s["end"] - s["start"]
+        if raw_dur < min_dur:
+            logger.warning(f"Dropping clip - too short ({raw_dur:.1f}s < {min_dur}s): {s.get('title')}")
             continue
-        if dur < target_min:
-            # Try to extend
-            s["end"] = min(s["start"] + target_min, video_duration)
-            dur = s["end"] - s["start"]
-            logger.info(f"Extended short clip to {dur:.1f}s: {s.get('title')}")
-        if dur > target_max:
-            s["end"] = s["start"] + target_max
-            dur = target_max
-            logger.info(f"Trimmed long clip to {target_max}s: {s.get('title')}")
+
+        if transcript or units:
+            orig_st, orig_en = s["start"], s["end"]
+            snapped_st, snapped_en = clip_boundaries.snap_clip_boundaries(
+                orig_st,
+                orig_en,
+                transcript or [],
+                video_duration,
+                min_dur=min_dur,
+                target_min=target_min,
+                target_max=target_max,
+                units=units,
+            )
+            s["start"], s["end"] = snapped_st, snapped_en
+            if abs(snapped_st - orig_st) >= 0.1 or abs(snapped_en - orig_en) >= 0.1:
+                logger.info(
+                    "Snapped clip boundaries %.2f-%.2fs -> %.2f-%.2fs: %s",
+                    orig_st, orig_en, snapped_st, snapped_en, s.get("title"),
+                )
+        else:
+            dur = raw_dur
+            if dur < target_min:
+                s["end"] = min(s["start"] + target_min, video_duration)
+                dur = s["end"] - s["start"]
+                logger.info(f"Extended short clip to {dur:.1f}s: {s.get('title')}")
+            if dur > target_max:
+                s["end"] = s["start"] + target_max
+                logger.info(f"Trimmed long clip to {target_max}s: {s.get('title')}")
+
+        if s["end"] - s["start"] < min_dur:
+            continue
 
         valid.append(s)
 
     valid.sort(key=lambda x: x["start"])
+
+    if not dedupe_overlaps:
+        return valid
 
     # Remove overlaps
     non_overlapping = []
@@ -339,30 +447,55 @@ def _build_chunk_prompt(
     min_duration: int = 30,
     max_duration: int = 60,
     custom_prompt: Optional[str] = None,
+    highlight_signals: Optional[dict] = None,
 ) -> str:
-    chunk_start = chunk[0]["start"] if chunk else 0
-    chunk_end = chunk[-1]["end"] if chunk else 0
+    chunk_start = float(chunk[0]["start"]) if chunk else 0.0
+    chunk_end = float(chunk[-1]["end"]) if chunk else 0.0
     focus_note = f"\n- Creator Focus Instruction: {custom_prompt.strip()}" if custom_prompt and custom_prompt.strip() else ""
+
+    was_live = bool((highlight_signals or {}).get("was_live", False))
+    chunk_hotspots = hs.get_chunk_hotspots(chunk_start, chunk_end, highlight_signals)
+    signals_block = hs.format_chunk_signals_block(chunk_start, chunk_end, highlight_signals)
+
+    live_note = (
+        "\n- This is an ended LIVESTREAM VOD: prioritize funny banter, chaotic reactions, unexpected jokes, "
+        "chat-explosion moments, and high-energy stories. Skip quiet filler, lobby waiting, or BRB stretches."
+        if was_live
+        else ""
+    )
+    count_rule = (
+        "- Return 0 to 4 clips for this section — if this section is slow, repetitive, or filler, return [] instead of forcing weak clips."
+        if total_chunks > 3
+        else "- You MUST return at least 2-3 clips for this section so we have enough options"
+    )
+    signal_rule = (
+        "\n- Moments tagged with [HOTSPOT: ...] had real live-chat explosions (e.g. LMAO/CLIP IT), Most Replayed peaks, "
+        "or loud audio/laughter reactions — strongly inspect the setup + payoff around those timestamps!"
+        if chunk_hotspots
+        else ""
+    )
 
     return f"""You are a viral video editor.
 This is part {chunk_index+1} of {total_chunks} of a video transcript.
-This section covers timestamps from {chunk_start:.0f}s to {chunk_end:.0f}s.
+This section covers timestamps from {chunk_start:.1f}s to {chunk_end:.1f}s.
 
-Find the 3-5 BEST moments in this section suitable for viral short clips.
+Find the BEST moments in this section suitable for viral short clips.
 
 Rules:
-- Each clip MUST be between {min_duration} and {max_duration} seconds long. This is STRICT — no shorter, no longer.
-- Clips MUST stay within this section's bounds: {chunk_start:.0f}s to {chunk_end:.0f}s
-- Must start and end at natural speech boundaries with a strong opening hook{focus_note}
+- Target length: between {min_duration} and {max_duration} seconds long (prefer staying inside {min_duration}-{max_duration}s, and NEVER cut off mid-sentence just to hit an exact second count)
+- Clips MUST stay within this section's bounds: {chunk_start:.1f}s to {chunk_end:.1f}s
+- COMPLETE ENDINGS ARE CRITICAL: Every clip MUST start on a clean opening hook and end AFTER a complete sentence, finished thought, or punchline. Never end mid-sentence, mid-clause, or on a trailing conjunction/setup.
+- Do NOT pick a clip that gets cut off by the end of this transcript section — skip incomplete thoughts at the tail edge.
+- Copy exact float-second timestamps from the `[start-end]` markers in the transcript below (e.g. if a sentence ends in `[142.3s-146.8s]`, set `"end": 146.8`).{live_note}{signal_rule}{focus_note}
 - Only pick genuinely strong moments
-- You MUST return at least 2-3 clips for this section so we have enough options
+{count_rule}
 - Make sure "start" and "end" are float numbers of seconds
 - Generate a catchy, clickbait-style title for each clip (max 8 words)
 - Generate 3-5 relevant hashtags for social media (e.g. #motivation #viral)
 - Generate 3-5 SEO tags/keywords (single words or short phrases)
 
-TRANSCRIPT SECTION:
-{_format_transcript(chunk)}
+{signals_block}TRANSCRIPT SECTION:
+{_format_transcript(chunk, chunk_hotspots)}
 
 Return ONLY JSON array:
 [
@@ -394,12 +527,12 @@ CANDIDATES:
 {_format_candidates(candidates)}
 
 Rules:
-- Return between 5 and 10 clips (each STRICTLY between {min_duration} and {max_duration} seconds long)
+- Return between 5 and 10 clips (each around {min_duration}-{max_duration} seconds long)
 - You MUST return AT LEAST 5 clips when enough candidates exist.{focus_note}
 - No overlapping timestamps
 - Sort by start time ascending
 - "start" and "end" must be float numbers of seconds
-- Adjust start/end timestamps if needed to ensure each clip is {min_duration}-{max_duration} seconds
+- KEEP THE EXACT "start" and "end" timestamps from the chosen candidates — do NOT alter, round, or shorten them (they are already aligned to exact sentence endings).
 - Keep the existing title, reason, viral_score, hashtags, and tags from candidates
 
 Return ONLY the selected candidates as JSON array in the exact same format. Do not remove any fields.

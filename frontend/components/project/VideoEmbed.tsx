@@ -3,9 +3,9 @@ interface VideoEmbedProps {
 }
 
 export function VideoEmbed({ url }: VideoEmbedProps) {
-    // Extract video ID from youtube URL
+    // Extract video ID from youtube URL (watch, youtu.be, shorts, live, embed)
     const getOutputVideoId = (url: string) => {
-        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+        const regExp = /^.*(youtu\.be\/|v\/|u\/\w\/|embed\/|shorts\/|live\/|watch\?v=|&v=)([^#&?/]*).*/;
         const match = url.match(regExp);
         return (match && match[2].length === 11) ? match[2] : null;
     };
